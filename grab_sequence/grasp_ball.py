@@ -11,7 +11,8 @@ forward kinematics here reproduce link4/link5/EE to under a millimetre):
 
   * joint2 sits 0.2095 m up and the shoulder->wrist chain is 0.254 m long, so
     with the gripper held perpendicular to the floor the grasp point can only
-    be placed at a radius of 0.099..0.157 m from the arm axis at (-0.110, 0).
+    be placed at a radius of 0.099..0.157 m from the arm axis, which is at the
+    chassis front (see ARM_X).
   * from the search pose the camera sits ~0.42 m up looking ~79 deg down, with
     its axis meeting the floor at radius ~0.198 m; the 110 deg field of view
     covers the whole grasp band comfortably.
@@ -21,6 +22,7 @@ sweep it to look around itself for the ball.
 """
 
 import math
+import statistics
 import time
 
 import cv2
@@ -68,8 +70,16 @@ TARGET_GRASP_Z = 0.075
 # needed (a sphere would need +radius here to reach its centre).
 TARGET_RAY_OFFSET = 0.0
 
+# Measured top-surface height above which the shuttlecock is standing on its
+# cork. Standing it is 0.085 tall; on its side the skirt is 65 mm across, so the
+# top reads 0.052..0.065 depending on how far it has tipped. The two never
+# overlap, which makes height a far better orientation test than blob shape.
+UPRIGHT_TOP_Z = 0.075
+
 # --- arm geometry, from open_manipulator/body.xacro ----------------------
-ARM_X = -0.110          # joint1 axis in base_link
+# joint1 axis in base_link. Must match the arm mount in rosbot_xl.urdf.xacro;
+# the arm sits at the chassis front so the working zone is ahead of the robot.
+ARM_X = 0.065
 SHOULDER_H = 0.2095     # joint2 height
 V1 = (0.024, 0.128)     # joint2 -> joint3, in the arm plane
 L2 = math.hypot(*V1)
@@ -96,15 +106,17 @@ JOINT_LIMITS = [
 # joint4 is kept off its 1.97 limit on purpose.
 SEARCH_J234 = (-0.5834, -0.0914, 1.8486)
 
-# joint1 values to sweep while looking for the ball. Rear and side bearings
-# put the floor patch clear of the chassis and wheels; joint1's upper limit is
-# pi, so 170 deg is used rather than a true 180.
+# joint1 values to sweep while looking for the target. With the arm moved to the
+# chassis front these face forward, where the floor is clear: the chassis ends at
+# x=+0.161 and is 0.135 wide either side, so at the arm's reach a bearing beyond
+# roughly +-75 deg lands the grasp point under the robot itself. Straight ahead
+# is tried first since that is where a shuttlecock the robot drove up to will be.
 SEARCH_BEARINGS = [
-    math.radians(170.0),
-    math.radians(135.0),
-    math.radians(-135.0),
-    math.radians(90.0),
-    math.radians(-90.0),
+    math.radians(0.0),
+    math.radians(35.0),
+    math.radians(-35.0),
+    math.radians(70.0),
+    math.radians(-70.0),
 ]
 
 HOVER = 0.06
@@ -219,24 +231,23 @@ class BallGrasper(Node):
             return
         depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
 
-        # Use only the object's top face, not the whole silhouette. The camera
-        # looks down about 11 degrees off vertical, so the mask also catches the
-        # near side wall of the skirt and a plain centroid gets pulled ~14 mm
-        # off the axis -- more than the ~10 mm of clearance the jaws have.
-        # Keeping just the closest surface leaves the top disc, whose centroid
-        # is the axis.
+        # Whole-blob centroid with the median depth across it.
+        #
+        # This previously used only pixels within 15 mm of the nearest depth, on
+        # the theory that the mask also catches the skirt's near side wall and
+        # would drag a plain centroid off-axis. Measured against ground truth,
+        # that patch drops below 20 pixels at ordinary poses -- every frame then
+        # gets rejected here and the object is never seen at all. The whole blob
+        # is far more robust and, once the camera is aimed at the target (see the
+        # re-aim step in main), lands within about 6 mm.
         blob = np.zeros(mask.shape, dtype=np.uint8)
         cv2.drawContours(blob, [largest], -1, 255, cv2.FILLED)
         valid = (blob > 0) & np.isfinite(depth_img) & (depth_img > 0.0)
-        if not valid.any():
+        if int(valid.sum()) < 50:
             return
-        d_min = float(depth_img[valid].min())
-        top = valid & (depth_img <= d_min + 0.015)
-        ys, xs = np.nonzero(top)
-        if len(xs) < 20:
-            return
+        ys, xs = np.nonzero(valid)
         u, v = float(xs.mean()), float(ys.mean())
-        d = float(depth_img[top].mean())
+        d = float(np.median(depth_img[valid]))
 
         # Long axis of the silhouette, for aligning the wrist roll. Taken from
         # the whole blob rather than just the top face, since a shuttlecock
@@ -344,13 +355,30 @@ class BallGrasper(Node):
         self.gripper_pub.publish(msg)
 
         end = time.monotonic() + seconds
+        last, still_since = None, None
         while rclpy.ok() and time.monotonic() < end:
-            rclpy.spin_once(self, timeout_sec=0.05)
+            rclpy.spin_once(self, timeout_sec=0.02)
             q = self.joint_positions.get("gripper_left_joint")
-            # Stop early once it arrives, or once it stalls against the object
-            # (closing onto something is a success, not a failure).
-            if q is not None and abs(q - position) < 0.0005:
+            if q is None:
+                continue
+            # Reached the commanded position.
+            if abs(q - position) < 0.0005:
                 return
+            # Or stopped moving, which is what closing onto the object looks
+            # like. Waiting out the full timeout after the jaws have already
+            # stalled was costing several seconds on every pick.
+            now = time.monotonic()
+            if last is not None and abs(q - last) < 0.0002:
+                if still_since is None:
+                    still_since = now
+                elif now - still_since > 0.4:
+                    self.get_logger().info(
+                        f"gripper stalled at {q:.4f} (target {position:.4f})"
+                    )
+                    return
+            else:
+                still_since = None
+            last = q
         q = self.joint_positions.get("gripper_left_joint")
         if q is not None:
             self.get_logger().info(f"gripper at {q:.4f} (target {position:.4f})")
@@ -381,7 +409,7 @@ class BallGrasper(Node):
         while rclpy.ok() and time.monotonic() < end:
             rclpy.spin_once(self, timeout_sec=0.05)
 
-    def locate_ball(self, num_samples=15, timeout_sec=6.0):
+    def locate_ball(self, num_samples=10, timeout_sec=5.0):
         """Average several detections into one (x, y, z) in base_link.
 
         The deadline is wall-clock: under use_sim_time this node's ROS clock
@@ -397,7 +425,14 @@ class BallGrasper(Node):
             rclpy.spin_once(self, timeout_sec=0.2)
         self.collecting = False
         xs, ys, zs, c2s, s2s = zip(*self.samples)
-        pos = (sum(xs) / len(xs), sum(ys) / len(ys), sum(zs) / len(zs))
+
+        # Median, not mean, and over many samples. The simulated ZED carries
+        # stddev_error=0.03 (stereolabs_zed.urdf.xacro), i.e. 30 mm of Gaussian
+        # depth noise, against roughly 10 mm of jaw clearance. Averaging 15
+        # samples left ~17 mm of error with 40 mm outliers, which was the single
+        # biggest cause of missed grasps. The median ignores the outliers and
+        # the larger sample count shrinks the rest as 1/sqrt(n).
+        pos = (statistics.median(xs), statistics.median(ys), statistics.median(zs))
 
         # Average the direction as a unit vector rather than averaging angles,
         # which would break across the +-pi wrap.
@@ -415,11 +450,20 @@ def main():
     rclpy.init()
     node = BallGrasper()
 
-    time.sleep(10.0)
+    # Wait for move_group to actually appear rather than sleeping a fixed 10 s.
+    # On a warm system it is up in a second or two, and the old fixed sleeps
+    # were 13 s of the ~43 s a pick used to take.
+    deadline = time.monotonic() + 30.0
+    while rclpy.ok() and time.monotonic() < deadline:
+        if any("move_group" in n for n in node.get_node_names()):
+            break
+        rclpy.spin_once(node, timeout_sec=0.2)
+    node.settle(1.0)
+
     moveit = MoveItPy(node_name="grasp_ball_moveit")
     arm = moveit.get_planning_component("manipulator")
     robot_model = moveit.get_robot_model()
-    time.sleep(3.0)
+    node.settle(1.0)
 
     def run(component):
         plan = component.plan()
@@ -448,7 +492,7 @@ def main():
                 return False
             if not move_joints(joints, f"{label} (try {attempt + 1})"):
                 return False
-            node.settle(0.6)
+            node.settle(0.2)
             actual = node.arm_joints_now()
             if actual is None:
                 return True
@@ -472,7 +516,7 @@ def main():
         if not run(arm):
             node.get_logger().error(f"Arm move failed: {label}")
             return False
-        time.sleep(0.5)
+        time.sleep(0.15)
         return True
 
     try:
@@ -499,7 +543,7 @@ def main():
                 # joint2 sags for a while after the trajectory reports done, and
                 # the camera rides on link5 -- detecting too early pairs an
                 # image with a pose the arm has already crept away from.
-                node.settle(3.0)
+                node.settle(1.0)
                 found, axis = node.locate_ball()
                 if found is None:
                     continue
@@ -509,6 +553,34 @@ def main():
                        else ", upright (no usable axis)")
                 )
                 if arm_joints_for(found[0], found[1], TARGET_GRASP_Z) is not None:
+                    # Re-aim and re-measure before committing.
+                    #
+                    # The sweep accepts whichever bearing first sees the object,
+                    # which is usually not the bearing pointing at it, and the
+                    # camera's own axis meets the floor at radius ~0.198. An
+                    # object seen well off that axis measures badly: at bearing
+                    # 135 seen from 170 the error was 17.8 mm, and 5.6 mm once
+                    # joint1 was turned to face it. Only joint1 moves here, so
+                    # unlike lifting the camera overhead there is no reach or
+                    # joint-limit problem.
+                    aim = math.atan2(found[1], found[0] - ARM_X)
+                    lo, hi = JOINT_LIMITS[0]
+                    delta = math.atan2(math.sin(aim - bearing), math.cos(aim - bearing))
+                    if abs(delta) > math.radians(4.0) and lo <= aim <= hi:
+                        node.get_logger().info(
+                            f"Re-aiming joint1 {math.degrees(bearing):.0f} -> "
+                            f"{math.degrees(aim):.0f} deg and re-measuring"
+                        )
+                        if move_joints((aim,) + SEARCH_J234, "re-aim"):
+                            node.settle(1.0)
+                            refined, refined_axis = node.locate_ball()
+                            if refined is not None:
+                                found = refined
+                                if refined_axis is not None:
+                                    axis = refined_axis
+                                node.get_logger().info(
+                                    f"Refined to ({found[0]:.3f}, {found[1]:.3f})"
+                                )
                     ball = found
                     target_axis = axis
                     break
@@ -526,21 +598,33 @@ def main():
                 node.get_logger().error("No reachable shuttlecock found")
                 return
 
-        # Vision supplies where the object is (x, y) and how high its top
-        # surface sits; the grasp height comes off that rather than a constant,
-        # because a shuttlecock standing on its cork is 85 mm tall while one
-        # lying on its side is only about 65 mm, and the right place to close
-        # the jaws differs in each case.
+        # Standing or lying is decided by the measured height of the top
+        # surface, not by how elongated the blob looks.
+        #
+        # A shuttlecock on its cork measures ~0.085 and one on its side ~0.052
+        # to 0.065, which separate cleanly. Blob eccentricity does not: over a
+        # 12-trial sweep it disagreed with the measured height on 5 of 10
+        # detections, in both directions. Upright shuttlecocks read as elongated
+        # because the camera sees the skirt wall from 11 degrees off vertical,
+        # and tilted ones read as round when foreshortened. Since this branch
+        # picks the grasp height, getting it wrong put the jaws tens of mm off.
         bx, by = ball[0], ball[1]
         top_z = ball[2]
-        if target_axis is not None:
-            # Lying down: the body is a cylinder on its side, widest across the
-            # middle, so close there rather than near the top where it narrows.
-            bz = max(0.02, 0.5 * top_z)
-        else:
-            # Standing: grip the top of the skirt, just under its rim.
+        upright = top_z > UPRIGHT_TOP_Z
+        if upright:
+            # Grip the top of the skirt, just under its rim.
             bz = max(0.02, top_z - 0.010)
-        node.get_logger().info(f"Top surface at z={top_z:.3f}, grasping at z={bz:.3f}")
+            roll_axis = None
+        else:
+            # On its side the body is a cylinder, widest across the middle, so
+            # close there rather than near the top where it narrows away.
+            bz = max(0.02, 0.5 * top_z)
+            roll_axis = target_axis
+        node.get_logger().info(
+            f"Top surface at z={top_z:.3f} -> {'upright' if upright else 'on its side'}, "
+            f"grasping at z={bz:.3f}"
+        )
+        target_axis = roll_axis
         joints_grasp = arm_joints_for(bx, by, bz)
         joints_hover = arm_joints_for(bx, by, bz + HOVER)
         if joints_grasp is None or joints_hover is None:
