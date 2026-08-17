@@ -15,6 +15,7 @@ Run:  python3 repeatability_test.py [n_trials]
 """
 
 import math
+import os
 import random
 import re
 import subprocess
@@ -22,10 +23,30 @@ import sys
 import time
 
 WORLD = "husarion_world"
-ARM_X = -0.110
+
+
+def _arm_x():
+    """Read ARM_X from grasp_ball.py rather than keeping a second copy.
+
+    A duplicate here silently went stale when the arm moved to the chassis
+    front, and every trial then placed the target behind the robot where it
+    cannot be reached -- scoring the robot down for a harness bug.
+    """
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "grab_sequence", "grasp_ball.py")
+    with open(src) as fh:
+        m = re.search(r"^ARM_X\s*=\s*([-\d.]+)", fh.read(), re.M)
+    if not m:
+        raise RuntimeError("ARM_X not found in grasp_ball.py")
+    return float(m.group(1))
+
+
+ARM_X = _arm_x()
 LIFT_THRESHOLD = 0.030      # m above start z to count as picked up
 GRIPPER_OPEN = 0.017
-GRIPPER_FREE_CLOSE = -0.009
+# The CAD claw closes to -0.023 (gripper_lower in body.xacro); reaching it
+# means the jaws met with nothing between them.
+GRIPPER_FREE_CLOSE = -0.023
 
 
 def gz(args, timeout=20):

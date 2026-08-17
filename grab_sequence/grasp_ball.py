@@ -34,8 +34,10 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import PointStamped
 from moveit.core.robot_state import RobotState
 from moveit.planning import MoveItPy
+from rclpy.action import ActionClient
 from rclpy.node import Node
 from builtin_interfaces.msg import Duration
+from control_msgs.action import FollowJointTrajectory
 from sensor_msgs.msg import CameraInfo, Image, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from tf2_geometry_msgs import do_transform_point
@@ -91,9 +93,23 @@ L3 = 0.124              # joint3 -> joint4 (= link5 origin)
 # the pads sit a further distance along the finger. Using only the second term
 # put the pads 0.082 m too low -- through the floor -- so the fingers splayed
 # against the ground plane and never touched the target.
-# The second term is pad_centre_x from body.xacro, the centre of the tapered
-# V pads; keep the two in step if that changes.
-GRASP_OFFSET = 0.0817 + 0.045
+# The second term is where along the claw the object is aimed to nest. The CAD
+# claw's pocket runs its whole length (measured void span 2..78 mm below the
+# finger mount, with no dead material below it), so the target can sit anywhere
+# along that wrap. Aim the lower part of it, not the middle: the tip is at
+# 78 mm, so aiming at 40 mm leaves 38 mm of claw under the grip point and the
+# tip hits the floor on anything lower than 38 mm. Aiming at 68 mm leaves 10 mm
+# and reaches the ~21 mm a lying shuttlecock needs.
+# Note jaw_geometry.py reports the midpoint of all collision geometry, which is
+# NOT this number -- it has no idea where the pocket is.
+GRASP_OFFSET = 0.0817 + 0.068
+
+# Lowest point of the claw below link5, measured from the CAD mesh (material
+# spans 2..78 mm below the finger mount). The gap between this and GRASP_OFFSET
+# is how much claw sits under the grip point, and so the lowest a grasp can go
+# before the tip is through the floor.
+CLAW_TIP_BELOW_LINK5 = 0.0817 + 0.078
+MIN_GRASP_Z = CLAW_TIP_BELOW_LINK5 - GRASP_OFFSET
 
 JOINT_LIMITS = [
     (-4.0 / 5.0 * math.pi, math.pi),   # joint1
@@ -463,15 +479,34 @@ def main():
     moveit = MoveItPy(node_name="grasp_ball_moveit")
     arm = moveit.get_planning_component("manipulator")
     robot_model = moveit.get_robot_model()
-    node.settle(1.0)
+
+    # Wait for the controller's action server, not just for move_group to exist.
+    # move_group appearing says nothing about whether MoveIt's controller action
+    # clients have connected, and firing the first move too early aborts it with
+    # "Action client not connected to action server". That killed whole runs at
+    # the first search pose, intermittently, in about half of them.
+    ready = ActionClient(node, FollowJointTrajectory,
+                         "/manipulator_controller/follow_joint_trajectory")
+    if not ready.wait_for_server(timeout_sec=30.0):
+        node.get_logger().error("manipulator_controller action server never appeared")
+        return
+    # The server existing is necessary but not sufficient: MoveIt's
+    # SimpleControllerManager builds its own action client, and that one can
+    # still be unconnected when the first move goes out. Our client connecting
+    # says nothing about MoveIt's, so give the manager a moment to catch up.
+    # Still far cheaper than the fixed 13 s this replaced.
+    node.settle(3.0)
 
     def run(component):
         plan = component.plan()
         return bool(plan) and bool(moveit.execute(plan.trajectory, controllers=[]))
 
-    # Joint values matching the SRDF "Open"/"Close" group states.
+    # Open is the SRDF "Open" state. Close drives to the CAD claw's lower stop
+    # rather than the SRDF's -0.009, which left a 26 mm gap between the claw
+    # tips -- wide enough for the shuttlecock's 26 mm cork to slip through.
+    # See gripper_lower in body.xacro; keep the two in step.
     GRIPPER_OPEN = 0.017
-    GRIPPER_CLOSE = -0.009
+    GRIPPER_CLOSE = -0.023
 
     def set_gripper(state):
         node.set_gripper(GRIPPER_OPEN if state == "Open" else GRIPPER_CLOSE)
@@ -625,6 +660,24 @@ def main():
             f"grasping at z={bz:.3f}"
         )
         target_axis = roll_axis
+
+        # Refuse grasps that would drive the claw through the floor.
+        #
+        # The claw hangs CLAW_TIP_BELOW_LINK5 down the tool while its grip
+        # surface is only GRASP_OFFSET down, so the grip point cannot go below
+        # the difference without the tip going underground. Without this check
+        # the arm simply jams into the ground, the object gets nudged away and
+        # the jaws close on air, with nothing in the log saying why.
+        if bz < MIN_GRASP_Z - 1e-6:
+            node.get_logger().error(
+                f"Grasp at z={bz:.3f} would put the claw tip "
+                f"{1000 * (MIN_GRASP_Z - bz):.0f} mm below the floor. This claw "
+                f"cannot pick anything needing a grip below z={MIN_GRASP_Z:.3f} "
+                "-- it reaches 0.075 for an upright shuttlecock but not the "
+                "~0.021 a lying one needs. Shorten the claw below its grip "
+                "surface, or grip the object higher up."
+            )
+            return
         joints_grasp = arm_joints_for(bx, by, bz)
         joints_hover = arm_joints_for(bx, by, bz + HOVER)
         if joints_grasp is None or joints_hover is None:
