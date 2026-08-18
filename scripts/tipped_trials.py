@@ -14,8 +14,8 @@ import sys
 import time
 
 sys.path.insert(0, "/home/aydan-ling/rosbot_ws/src/grab_sequence/scripts")
-from repeatability_test import (ARM_X, model_pose, park_arm, run_grasp,  # noqa: E402
-                                set_pose, skirt_centre)
+from repeatability_test import (ARM_X, ensure_shuttlecock, model_pose,  # noqa: E402
+                                park_arm, run_grasp, set_pose, skirt_centre)
 
 LIFT = 0.030
 
@@ -43,6 +43,9 @@ def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 3
     rng = random.Random(int(sys.argv[2]) if len(sys.argv) > 2 else 7)
     results = []
+
+    # Guarantees the skirt mesh actually loaded; see ensure_shuttlecock.
+    ensure_shuttlecock()
 
     for i in range(1, n + 1):
         set_pose("rosbot", 0, 0, 0)

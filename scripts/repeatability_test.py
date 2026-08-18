@@ -135,6 +135,48 @@ def park_arm():
     )
 
 
+def ensure_shuttlecock(x=0.215, y=0.0, z=0.033):
+    """Spawn the shuttlecock, resolving its skirt mesh to an absolute path.
+
+    model.sdf refers to the skirt as model://shuttlecock/meshes/skirt.stl, which
+    Gazebo resolves by searching GZ_SIM_RESOURCE_PATH. Nothing in this workspace
+    puts grab_sequence/models on that path, so spawning the model by absolute
+    sdf_filename loads the cork cylinder and silently drops the skirt.
+
+    That failure is quiet and it wrecks the pick in four separate ways, all of
+    which look like unrelated perception bugs:
+      * the yellow blob falls from ~1018 px to 169 px,
+      * it becomes a perfect circle (PCA eigenvalues equal), so the long axis
+        never resolves and the wrist-roll alignment never runs,
+      * the centroid lands on the cork, ~42 mm from the skirt centre the
+        harness scores against,
+      * the skirt collision is missing too, so the object rolls like a bare
+        cylinder and leaves the reachable band while settling.
+
+    Rewriting the URI to an absolute file:// path sidesteps the search entirely.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(here, "..", "models", "shuttlecock")
+    model_dir = os.path.abspath(model_dir)
+    with open(os.path.join(model_dir, "model.sdf")) as fh:
+        sdf = fh.read()
+    sdf = sdf.replace("model://shuttlecock/", f"file://{model_dir}/")
+    tmp = "/tmp/shuttlecock_resolved.sdf"
+    with open(tmp, "w") as fh:
+        fh.write(sdf)
+
+    gz(["gz", "service", "-s", f"/world/{WORLD}/remove",
+        "--reqtype", "gz.msgs.Entity", "--reptype", "gz.msgs.Boolean",
+        "--timeout", "5000", "--req", 'name: "shuttlecock", type: 2'])
+    time.sleep(2)
+    gz(["gz", "service", "-s", f"/world/{WORLD}/create",
+        "--reqtype", "gz.msgs.EntityFactory", "--reptype", "gz.msgs.Boolean",
+        "--timeout", "10000", "--req",
+        f'sdf_filename: "{tmp}", name: "shuttlecock", '
+        f"pose: {{position: {{x: {x}, y: {y}, z: {z}}}}}"])
+    time.sleep(4)
+
+
 def sample_target(rng):
     """A pose inside the reachable band, avoiding joint1's blind sector.
 
@@ -197,6 +239,8 @@ def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 12
     rng = random.Random(20260812)
     results = []
+
+    ensure_shuttlecock()
 
     for i in range(1, n + 1):
         set_pose("rosbot", 0, 0, 0)
