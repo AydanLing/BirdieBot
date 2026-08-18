@@ -49,7 +49,10 @@ CAMERA_INFO_TOPIC = "/zed/zed_node/rgb/camera_info"
 
 LOWER_YELLOW = np.array([20, 100, 100])
 UPPER_YELLOW = np.array([35, 255, 255])
-MIN_CONTOUR_AREA = 80.0
+# Pixel area, so it scales with the square of camera resolution. The ZED
+# dropped from 1280x720 to 640x360 (see stereolabs_zed.urdf.xacro) to make
+# the depth cloud usable as a nav2 costmap source, so this went 80 -> 20.
+MIN_CONTOUR_AREA = 20.0
 
 # --- target object: to-scale badminton shuttlecock ----------------------
 # Cork base 26 mm dia (z 0..0.025), feather skirt 65 mm dia (z 0.025..0.085).
@@ -314,7 +317,8 @@ class BallGrasper(Node):
         # rotation conventions. The stored angle is signed, pointing cork to
         # skirt, so it is averaged as a plain unit vector.
         c2 = s2 = None
-        if axis_px is not None and half_px > 2.0:
+        # Linear pixel measure, so it halves with the resolution drop (2.0 -> 1.0).
+        if axis_px is not None and half_px > 1.0:
             a = self._to_base(u - axis_px[0] * half_px, v - axis_px[1] * half_px,
                               d, depth_msg.header, tf, TARGET_RAY_OFFSET)
             b = self._to_base(u + axis_px[0] * half_px, v + axis_px[1] * half_px,
