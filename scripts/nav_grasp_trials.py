@@ -453,12 +453,79 @@ class NavGrasp(Node):
         return dist, dyaw
 
 
+# --- obstacles ------------------------------------------------------------
+# Deliberately absent from husarion_world.yaml, so nav2 has to discover them
+# from live sensors rather than plan around known map geometry.
+#
+# Placed at 0.85..1.15 m, inside the annulus targets are drawn from, so they
+# sit between the robot and a good fraction of the targets. They are NOT
+# placed nearer the targets than OBST_CLEAR: inflation_radius is 0.70 m, so an
+# obstacle close to a target would swallow the standoff pose in inflated cost
+# and make the goal unplannable -- that would test nav2's tolerance for
+# impossible goals, not obstacle avoidance.
+#
+# The last entry floats at z 0.30..0.60: invisible to the lidar plane at
+# z=0.07 and detectable only through the ZED depth layer added to the local
+# costmap. It is the one obstacle that exercises that layer.
+OBSTACLES = [
+    # x,     y,     sx,   sy,   sz,   z_centre
+    (0.95,  0.30,  0.30, 0.30, 0.60, 0.30),
+    (-0.30, 1.00,  0.30, 0.30, 0.60, 0.30),
+    (-1.00, -0.45, 0.30, 0.30, 0.60, 0.30),
+    (0.35, -1.00,  0.30, 0.30, 0.60, 0.30),
+    (1.05, -0.55,  0.40, 0.60, 0.30, 0.45),   # overhang: lidar cannot see it
+]
+OBST_CLEAR = 0.85         # m, minimum target-to-obstacle spacing
+OBST_START_CLEAR = 0.75   # m, keep the robot's start pose clear
+
+
+def spawn_obstacles():
+    """Put the pillars in the world, replacing any left from a previous run."""
+    import tempfile
+    for i, (x, y, sx, sy, sz, zc) in enumerate(OBSTACLES):
+        name = f"obstacle_{i}"
+        subprocess.run(
+            ["gz", "service", "-s", "/world/husarion_world/remove",
+             "--reqtype", "gz.msgs.Entity", "--reptype", "gz.msgs.Boolean",
+             "--timeout", "4000", "--req", f'name: "{name}", type: 2'],
+            capture_output=True, text=True, timeout=15)
+        sdf = f"""<?xml version="1.0" ?>
+<sdf version="1.8"><model name="{name}"><static>true</static><link name="l">
+<collision name="c"><geometry><box><size>{sx} {sy} {sz}</size></box></geometry></collision>
+<visual name="v"><geometry><box><size>{sx} {sy} {sz}</size></box></geometry>
+<material><ambient>0.7 0.25 0.2 1</ambient><diffuse>0.7 0.25 0.2 1</diffuse></material>
+</visual></link></model></sdf>"""
+        path = os.path.join(tempfile.gettempdir(), f"{name}.sdf")
+        with open(path, "w") as fh:
+            fh.write(sdf)
+        subprocess.run(
+            ["gz", "service", "-s", "/world/husarion_world/create",
+             "--reqtype", "gz.msgs.EntityFactory", "--reptype", "gz.msgs.Boolean",
+             "--timeout", "8000", "--req",
+             f'sdf_filename: "{path}", name: "{name}", '
+             f"pose: {{position: {{x: {x}, y: {y}, z: {zc}}}}}"],
+            capture_output=True, text=True, timeout=20)
+        time.sleep(1)
+
+
+def clear_of_obstacles(x, y):
+    if math.hypot(x, y) < OBST_START_CLEAR:
+        return False
+    return all(math.hypot(x - ox, y - oy) >= OBST_CLEAR
+               for ox, oy, *_ in OBSTACLES)
+
+
 def target_pose(rng):
     """A spot 1-2 m from the origin, lying on its side at a random heading."""
-    bearing = rng.uniform(-math.pi, math.pi)
-    radius = rng.uniform(1.0, 2.0)
-    x = radius * math.cos(bearing)
-    y = radius * math.sin(bearing)
+    for _ in range(200):
+        bearing = rng.uniform(-math.pi, math.pi)
+        radius = rng.uniform(1.0, 2.0)
+        x = radius * math.cos(bearing)
+        y = radius * math.sin(bearing)
+        if clear_of_obstacles(x, y):
+            break
+    else:
+        raise RuntimeError("no clear target spot found")
     yaw = rng.uniform(-math.pi, math.pi)
     h = math.pi / -4.0                       # half of -90 deg about X: lay it down
     qx_l, qw_l = math.sin(h), math.cos(h)
@@ -474,6 +541,7 @@ def main():
     rclpy.init()
     node = NavGrasp()
     ensure_shuttlecock()
+    spawn_obstacles()
     results = []
 
     for i in range(1, n + 1):
