@@ -32,14 +32,39 @@ MM = 0.001
 
 
 def load_triangles(path):
+    """Triangles from a *binary* STL, checked against the declared count.
+
+    The size check is the whole point. An ASCII STL, or a truncated download,
+    puts arbitrary bytes at offset 80, and the old version read that as a
+    triangle count and marched off the end of the buffer or allocated something
+    absurd. Worse, a count that is merely too small parses cleanly and yields a
+    partial mesh, so the boxes below would cover part of the claw and the URDF
+    would look plausible while missing geometry -- exactly the kind of quiet
+    wrong answer this script exists to prevent.
+
+    A binary STL is 84 + 50n bytes exactly, so the count and the file length
+    have to agree. (Testing for a leading "solid" is not sufficient: plenty of
+    binary STLs carry that word in their 80-byte header.)
+    """
     data = open(path, "rb").read()
+    if len(data) < 84:
+        raise ValueError(f"{path}: {len(data)} bytes, too short to be an STL")
     n = struct.unpack("<I", data[80:84])[0]
+    expected = 84 + 50 * n
+    if len(data) != expected:
+        hint = (" -- looks like an ASCII STL; convert it to binary first"
+                if data[:5].lower() == b"solid" else "")
+        raise ValueError(
+            f"{path}: header declares {n} triangles, which needs {expected} "
+            f"bytes, but the file is {len(data)}{hint}")
     tris = np.empty((n, 3, 3), dtype=np.float64)
     off = 84
     for i in range(n):
         v = struct.unpack("<12f", data[off:off + 48])
         tris[i] = np.array(v[3:12]).reshape(3, 3)
         off += 50
+    if not np.isfinite(tris).all():
+        raise ValueError(f"{path}: contains non-finite vertex coordinates")
     return tris
 
 
@@ -125,27 +150,42 @@ def main():
     pitch = float(sys.argv[2]) if len(sys.argv) > 2 else 4.0
     min_vox = int(sys.argv[3]) if len(sys.argv) > 3 else 2
 
-    tris = to_finger_frame(load_triangles(path))
+    try:
+        tris = to_finger_frame(load_triangles(path))
+    except (OSError, ValueError) as e:
+        print(f"  {e}")
+        sys.exit(1)
     grid, lo = voxelise(tris, pitch)
     filled = int(grid.sum())
-    boxes = greedy_boxes(grid, lo, pitch)
-    boxes = [b for b in boxes if np.prod(b[1]) >= min_vox * pitch ** 3]
+    all_boxes = greedy_boxes(grid, lo, pitch)
+    boxes = [b for b in all_boxes if np.prod(b[1]) >= min_vox * pitch ** 3]
 
     print(f"  {path}: {len(tris)} triangles, voxel pitch {pitch:.1f} mm")
     print(f"  filled voxels {filled}  ->  {len(boxes)} boxes "
           f"(dropped slivers under {min_vox} voxels)")
+    # Producing no output at all is a plausible-looking result: you paste
+    # nothing into the URDF, the jaw ends up with no collision geometry, and the
+    # object is pushed away exactly as it is with a hull. So say so, loudly, and
+    # exit non-zero rather than printing an empty list.
+    if not boxes:
+        print(f"  nothing to emit: {filled} filled voxels, "
+              f"{len(all_boxes)} raw boxes, all below the {min_vox}-voxel "
+              "threshold. Lower the pitch or min_vox; do not paste an empty "
+              "collision set into the URDF.")
+        sys.exit(1)
     solid = filled * pitch ** 3
-    bbox = np.prod(tris.reshape(-1, 3).max(0) - tris.reshape(-1, 3).min(0))
+    bbox = float(np.prod(tris.reshape(-1, 3).max(0) - tris.reshape(-1, 3).min(0)))
+    fill = f"{100*solid/bbox:.0f}% fill" if bbox > 0 else "degenerate bbox"
     print(f"  solid {solid/1000:.1f} cm^3 vs bbox {bbox/1000:.1f} cm^3 "
-          f"({100*solid/bbox:.0f}% fill -- a hull would report ~100%)")
+          f"({fill} -- a hull would report ~100%)")
     print()
     for centre, size in sorted(boxes, key=lambda b: -np.prod(b[1])):
         c = centre * MM
         s = size * MM
-        print(f'      <collision>')
+        print('      <collision>')
         print(f'        <origin xyz="{c[0]:.4f} {c[1]:.4f} {c[2]:.4f}" rpy="0 0 0"/>')
         print(f'        <geometry><box size="{s[0]:.4f} {s[1]:.4f} {s[2]:.4f}"/></geometry>')
-        print(f'      </collision>')
+        print('      </collision>')
 
 
 if __name__ == "__main__":

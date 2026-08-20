@@ -39,12 +39,25 @@ def rpy_matrix(r, p, y):
 
 
 def render():
-    share = subprocess.run(["ros2", "pkg", "prefix", "rosbot_description"],
-                           capture_output=True, text=True).stdout.strip()
+    # `ros2 pkg prefix` on a package that is not on the path exits non-zero and
+    # prints nothing on stdout. Unchecked, that left `share` empty and built a
+    # relative xacro path, so the failure surfaced as a confusing xacro error
+    # about a missing file rather than "the workspace is not sourced".
+    pkg = subprocess.run(["ros2", "pkg", "prefix", "rosbot_description"],
+                         capture_output=True, text=True)
+    share = pkg.stdout.strip()
+    if pkg.returncode != 0 or not share:
+        print("  cannot locate rosbot_description -- source the workspace "
+              f"first ({(pkg.stderr or '').strip()[:200]})")
+        sys.exit(1)
     xacro_path = os.path.join(share, "share", "rosbot_description", "urdf",
                               "rosbot_xl.urdf.xacro")
     comp = os.path.join(share, "share", "rosbot_description", "config",
                         "rosbot_xl", "manipulation_pro.yaml")
+    for path in (xacro_path, comp):
+        if not os.path.isfile(path):
+            print(f"  expected file is missing: {path}")
+            sys.exit(1)
     out = subprocess.run(
         ["xacro", xacro_path, f"components_config:={comp}",
          "configuration:=manipulation_pro", "use_sim:=true"],
@@ -85,12 +98,20 @@ def corners(collision):
 
 def main():
     root = render()
+    # Every lookup below is checked. A renamed or missing element used to come
+    # back as None and die with an AttributeError several lines later, which
+    # reads as a bug in this script rather than as "body.xacro no longer has
+    # that joint".
     joint = root.find('.//joint[@name="gripper_left_joint"]')
+    link = root.find('.//link[@name="gripper_left_link"]')
+    if joint is None or link is None:
+        print("  gripper_left_joint / gripper_left_link not in the rendered "
+              "URDF -- has body.xacro been renamed?")
+        sys.exit(1)
     mount_y = float(joint.find("origin").get("xyz").split()[1])
     q_open = float(joint.find("limit").get("upper"))
     q_close = float(joint.find("limit").get("lower"))
 
-    link = root.find('.//link[@name="gripper_left_link"]')
     pieces, meshes = [], 0
     for c in link.findall("collision"):
         pts = corners(c)
@@ -104,8 +125,11 @@ def main():
               "not in the URDF,\n        so they are not counted below. Check them "
               "in Gazebo with collisions shown.")
     if not pieces:
-        print("  No primitive collision geometry found on the jaw.")
-        return
+        # Exits non-zero: with no primitive geometry there is nothing to check,
+        # and a silent exit 0 here reads to any caller as "the jaw passed".
+        print("  No primitive collision geometry found on the jaw -- nothing "
+              "was checked. This is not a pass.")
+        sys.exit(1)
 
     flat = [p for piece in pieces for p in piece]
     inner = min(abs(mount_y + q_open + p[1]) for p in flat)
@@ -144,6 +168,10 @@ def main():
     print("  (set this in grab_sequence/grasp_ball.py; nothing checks it for you)")
     print()
     print("  " + ("all good" if ok else "fix the FAILs before launching"))
+    # Exit status matches the verdict so this can gate a launch script. Printing
+    # FAIL and exiting 0 is the same silent-success trap the trial harnesses had.
+    if not ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
