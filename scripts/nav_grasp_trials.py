@@ -428,8 +428,29 @@ class NavGrasp(Node):
     def fine_approach(self, gx, gy, gyaw):
         """Drive the residual nav2 left behind, closing on the AMCL estimate.
 
-        Holonomic base, so this corrects x, y and yaw together rather than
-        turning to face and driving in. Returns the final (dist, dyaw) error.
+        Turns to face the goal, drives to it, then turns to the goal heading.
+        It does NOT strafe, even though the base is nominally holonomic.
+
+        This used to command linear.y directly, on the reasoning that a mecanum
+        base can correct x and y at once. Measured against ground truth with
+        /cmd_vel confirmed silent at idle, that lateral term is nearly inert:
+
+            commanded +x 0.15 m/s for 6 s  ->  travelled 0.839 m   (93%)
+            commanded +y 0.15 m/s for 6 s  ->  travelled 0.024 m   (3%)
+
+        Nothing is misconfigured. The controller emits textbook strafe wheel
+        velocities (FL -3.061, FR +3.061, RL +3.061, RR -3.061 rad/s), and the
+        URDF and converted SDF both carry the mecanum surface friction, all four
+        fdir1 roller diagonals intact. The friction direction and mu2 are ODE
+        parameters, and gz-sim runs DART by default, whose contact model does
+        not apply them -- so friction ends up isotropic, the four wheels' lateral
+        components cancel, and the base slips instead of strafing. A real ROSbot
+        XL has physical rollers and would strafe; this is a simulation limit.
+
+        So the lateral command was not correcting anything, and convergence came
+        from the forward and rotational terms regardless. move_polar next door
+        already turns and drives for the same reason, which is why the vision
+        stage works. Returns the final (dist, dyaw) error.
         """
         end = time.time() + FINE_TIMEOUT
         dist = dyaw = float("inf")
@@ -444,18 +465,30 @@ class NavGrasp(Node):
             dyaw = wrap(gyaw - byaw)
             if dist < FINE_TOL and abs(dyaw) < FINE_YAW_TOL:
                 break
-            # rotate the map-frame error into the base frame
-            c, s = math.cos(-byaw), math.sin(-byaw)
-            fx, fy = ex * c - ey * s, ex * s + ey * c
+
             t = TwistStamped()
             t.header.stamp = self.get_clock().now().to_msg()
             t.header.frame_id = "base_link"
-            if dist > FINE_TOL:
-                n = max(dist, 1e-6)
-                t.twist.linear.x = FINE_V * fx / n
-                t.twist.linear.y = FINE_V * fy / n
-            if abs(dyaw) > FINE_YAW_TOL:
-                t.twist.angular.z = math.copysign(min(FINE_W, abs(dyaw) * 1.5), dyaw)
+
+            if dist >= FINE_TOL:
+                # Face the goal, then drive at it. If it is behind, back up
+                # rather than spinning 180 degrees for a few centimetres.
+                heading_err = wrap(math.atan2(ey, ex) - byaw)
+                reverse = abs(heading_err) > math.pi / 2
+                if reverse:
+                    heading_err = wrap(heading_err + math.pi)
+                if abs(heading_err) > 0.15:
+                    t.twist.angular.z = math.copysign(
+                        min(FINE_W, max(0.15, abs(heading_err) * 1.5)), heading_err)
+                else:
+                    v = min(FINE_V, max(0.04, dist * 0.8))
+                    t.twist.linear.x = -v if reverse else v
+                    t.twist.angular.z = heading_err * 1.0   # trim while driving
+            else:
+                # In position; settle the final heading.
+                t.twist.angular.z = math.copysign(
+                    min(FINE_W, max(0.15, abs(dyaw) * 1.5)), dyaw)
+
             self.cmd.publish(t)
             self.spin(0.05)
         self.stop()

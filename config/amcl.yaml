@@ -110,6 +110,22 @@ controller_server:
       wz_std: 0.4
       vx_max: 0.5
       vx_min: -0.35
+      # Inert. motion_model is DiffDrive, so MPPI only ever samples (vx, wz)
+      # and vy_max / vy_std are never consulted. Verified rather than assumed:
+      # driving to a goal 0.3 m ahead and 1.2 m to the SIDE -- the case that
+      # would most tempt a holonomic controller to strafe -- produced
+      # max |vy| = 0.000 over 250 /cmd_vel_nav samples, with vx and wz doing
+      # all the work. Left in place because switching motion_model to Omni is
+      # the one change that would make them live again.
+      #
+      # Be careful if you do that. The base cannot actually strafe in this
+      # simulation: commanded +y 0.15 m/s for 6 s travelled 0.024 m where +x
+      # travelled 0.839 m. Nothing is misconfigured -- the controller emits
+      # correct strafe wheel velocities and the SDF carries all four mecanum
+      # fdir1 roller diagonals -- but fdir1 and mu2 are ODE surface parameters
+      # and gz-sim runs DART, which does not apply them, so friction comes out
+      # isotropic. A real ROSbot XL has physical rollers and would strafe, so
+      # Omni would work on hardware while failing in simulation.
       vy_max: 0.5
       wz_max: 1.9
       iteration_count: 1
