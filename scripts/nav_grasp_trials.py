@@ -535,21 +535,24 @@ def obstacle_names():
 
 
 def obstacle_sdf(name, sx, sy, sz):
-    """Static box with a contact sensor on its collision.
+    """Static box. Collision evidence comes from ClearanceMonitor, not a sensor.
 
-    The contact sensor is what makes collision detection possible here at all.
     These obstacles are <static>true</static>, so an earlier check that
     compared their poses before and after a run and concluded "unmoved,
     therefore no collision" could not ever have failed: a static body cannot be
     pushed, so it reports "no collision" whether the robot grazed it, drove
-    into it, or never went near it. That check has been deleted.
+    into it, or never went near it. That check is gone.
 
-    A contact sensor reports the contacts physics actually computed, and static
-    geometry still generates contacts against a dynamic body, so this one can
-    genuinely come back positive. It needs the world to load
-    gz-sim-contact-system; husarion_world.sdf does (line 10). If the topic does
-    not appear, ContactMonitor reports the check as unavailable rather than
-    reporting a clean run -- silence must not read as success.
+    It was replaced by a contact sensor on this collision, which ALSO did not
+    work, for a different reason: a contact sensor on a model spawned at
+    RUNTIME is never instantiated, so its topic never appears in `gz topic -l`.
+    Verified static and non-static, with and without an explicit <topic>, in a
+    world that does load gz-sim-contact-system. The sensor has been removed
+    rather than left in looking functional.
+
+    ClearanceMonitor instead samples the robot's ground-truth pose from
+    /world/<world>/dynamic_pose/info for the whole trial and reports the
+    minimum footprint-to-box gap, which also catches near misses.
     """
     return f"""<?xml version="1.0" ?>
 <sdf version="1.8"><model name="{name}"><static>true</static><link name="l">
@@ -557,8 +560,6 @@ def obstacle_sdf(name, sx, sy, sz):
 <visual name="v"><geometry><box><size>{sx} {sy} {sz}</size></box></geometry>
 <material><ambient>0.7 0.25 0.2 1</ambient><diffuse>0.7 0.25 0.2 1</diffuse></material>
 </visual>
-<sensor name="contact" type="contact"><always_on>1</always_on><update_rate>30</update_rate>
-<contact><collision>c</collision></contact></sensor>
 </link></model></sdf>"""
 
 
@@ -618,140 +619,121 @@ def obstacle_clearance(bx, by):
     return best
 
 
-class ContactMonitor:
-    """Streams the obstacles' contact topics and counts real contacts.
+class ClearanceMonitor:
+    """Streams the robot's ground-truth pose and tracks its closest approach.
 
-    Deliberately reports three states, not two: contacts seen, no contacts
-    seen, and *unavailable*. The third matters. If the contact system is not
-    loaded, or the sensor names differ, or `gz topic` is not on PATH, then no
-    messages arrive -- and reporting that as "no collision" would be another
-    check that cannot fail, which is what this replaced in the first place.
+    This replaces a contact-sensor monitor that never worked. The sensors were
+    valid, the world loads gz-sim-contact-system, and an explicit <topic> was
+    tried -- but a contact sensor attached to a model spawned at RUNTIME is
+    never instantiated, so the topic simply never appears in `gz topic -l`.
+    Verified both static and non-static, and with an explicit topic name. The
+    old monitor therefore reported "unavailable" on every run, which was honest
+    but useless.
 
-    gz's Contact system publishes a Contacts message per update whether or not
-    anything is touching, so an arriving message is not a contact. The
-    discriminator is a `collision1` field, which only appears inside a real
-    contact record.
+    /world/<world>/dynamic_pose/info does work: it streams gz.msgs.Pose_V for
+    every moving entity, `rosbot` included, for as long as the simulator runs.
+    The obstacles are static and absent from it, but their poses are known --
+    this harness placed them.
 
-    Liveness comes from the topic being advertised: the topic only exists in
-    `gz topic -l` because the Contact system built the sensor, so its presence
-    is what licenses reading an empty stream as "no contact". The number of
-    bytes streamed is reported at the end of a run anyway, so a stream that was
-    silent for an entire run is visible rather than assumed healthy.
+    Sampling that stream the whole trial gives the MINIMUM clearance between
+    the robot's footprint and any obstacle box, which is strictly more useful
+    than a contact boolean: it distinguishes a clean run from a near miss, and
+    a negative value is a genuine overlap.
+
+    Still three-state for the same reason as before. If the stream produces no
+    usable samples, result() returns None -- unavailable -- rather than a
+    comfortable number. A check that cannot fail is worse than no check, which
+    is the trap the original static-pose comparison fell into.
     """
 
-    TOPIC_HINT = "/contact"
+    TOPIC = "/world/husarion_world/dynamic_pose/info"
 
     def __init__(self, names):
         self.names = list(names)
-        self.topics = {}
-        self.procs = {}
-        self.files = {}
+        self.proc = None
+        self.path = None
+        self.fh = None
         self.reason = ""
-        self.stream_bytes = 0
-        self._discover()
-        # An abort between start() and stop() would otherwise leave one
-        # `gz topic -e` per obstacle running against a simulator someone else
-        # is using. stop() is safe to call twice.
+        self.samples = 0
         atexit.register(self.stop)
-
-    def _discover(self, attempts=3, delay=2.0):
-        # Retried: the sensors are advertised a beat after the obstacles spawn,
-        # and giving up on the first look would disable the collision check for
-        # the whole run over a fraction of a second of startup lag.
-        for attempt in range(attempts):
-            rc, out = gz_run(["gz", "topic", "-l"], timeout=15)
-            if rc != 0:
-                self.reason = ("`gz topic -l` timed out" if rc is None
-                               else f"`gz topic -l` exited {rc}")
-            else:
-                lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-                for name in self.names:
-                    # default topic is
-                    #  /world/<world>/model/<m>/link/<l>/sensor/<s>/contact
-                    # but match on substrings so a gz version that names it
-                    # differently is still found rather than silently producing
-                    # an empty result.
-                    hits = [ln for ln in lines
-                            if f"/model/{name}/" in ln
-                            and ln.endswith(self.TOPIC_HINT)]
-                    if hits:
-                        self.topics[name] = hits[0]
-                if self.topics:
-                    self.reason = ""
-                    return
-                self.reason = (
-                    "no contact topics for the obstacles in `gz topic -l`; the "
-                    "world needs gz-sim-contact-system (husarion_world.sdf has "
-                    "it) and the obstacles need to have been spawned from "
-                    "obstacle_sdf()")
-            if attempt + 1 < attempts:
-                time.sleep(delay)
 
     @property
     def available(self):
-        return bool(self.topics)
-
-    def start(self):
-        if not self.available:
-            return False
-        for name, topic in self.topics.items():
-            path = os.path.join(tempfile.gettempdir(), f"contact_{name}.txt")
-            fh = open(path, "w")
-            # stdbuf -oL: redirected to a file, gz topic's stdout is fully
-            # buffered, so a short contact burst can still be sitting in a 4 kB
-            # buffer when the process is killed -- i.e. a real collision would
-            # be dropped precisely because it was brief. Line buffering makes
-            # the record survive. Falls back to unbuffered gz if stdbuf is
-            # missing rather than skipping the check.
-            for cmd in (["stdbuf", "-oL", "gz", "topic", "-e", "-t", topic],
-                        ["gz", "topic", "-e", "-t", topic]):
-                try:
-                    self.procs[name] = subprocess.Popen(
-                        cmd, stdout=fh, stderr=subprocess.DEVNULL,
-                        start_new_session=True)
-                    break
-                except FileNotFoundError:
-                    continue
-            else:
-                fh.close()
-                self.reason = "`gz topic` is not on PATH"
-                self.topics = {}
-                return False
-            self.files[name] = (path, fh)
         return True
 
-    def stop(self):
-        """-> list of obstacle names that reported contact, or None if unknown.
+    def start(self):
+        try:
+            fd, self.path = tempfile.mkstemp(prefix="clearance_", suffix=".txt")
+            self.fh = os.fdopen(fd, "w")
+            self.proc = subprocess.Popen(
+                ["stdbuf", "-oL", "gz", "topic", "-e", "-t", self.TOPIC],
+                stdout=self.fh, stderr=subprocess.DEVNULL,
+                preexec_fn=os.setsid,
+            )
+            return True
+        except FileNotFoundError:
+            self.reason = "`gz topic` or `stdbuf` is not on PATH"
+            self.proc = None
+            return False
 
-        None means the check did not run. It is never conflated with [].
-        """
-        for proc in self.procs.values():
-            # SIGINT first: the gz CLI handles it and flushes on the way out.
-            for sig, wait in ((signal.SIGINT, 5), (signal.SIGKILL, 3)):
-                try:
-                    os.killpg(os.getpgid(proc.pid), sig)
-                    proc.wait(timeout=wait)
-                    break
-                except (ProcessLookupError, PermissionError):
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-        self.procs = {}
-        hit = []
-        for name, (path, fh) in self.files.items():
-            fh.close()
-            try:
-                with open(path, errors="ignore") as rd:
-                    body = rd.read()
-            except OSError:
-                continue
-            self.stream_bytes += len(body)
-            if "collision1" in body:
-                hit.append(name)
-        self.files = {}
-        if not self.topics:
+    def stop(self):
+        """Returns the minimum clearance in metres, or None if unavailable."""
+        if self.proc is None:
             return None
-        return hit
+        try:
+            os.killpg(os.getpgid(self.proc.pid), signal.SIGINT)
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                self.proc.wait(timeout=5)
+        except (ProcessLookupError, PermissionError):
+            pass
+        self.proc = None
+        try:
+            self.fh.close()
+        except Exception:
+            pass
+        try:
+            with open(self.path, errors="ignore") as fh:
+                body = fh.read()
+            os.unlink(self.path)
+        except OSError:
+            self.reason = "clearance stream could not be read back"
+            return None
+        return self._min_clearance(body)
+
+    def _min_clearance(self, body):
+        """Smallest footprint-to-box gap seen across the streamed poses.
+
+        gz prints Pose_V as repeated `pose { name: ... position { x: y: z: } }`
+        blocks, and the robot's LINKS appear alongside the model, so this keys
+        strictly on the model name and takes the x/y that follow it.
+        """
+        best = None
+        lines = body.splitlines()
+        for i, line in enumerate(lines):
+            if line.strip() != 'name: "rosbot"':
+                continue
+            x = y = None
+            for probe in lines[i + 1:i + 12]:
+                t = probe.strip()
+                if t.startswith("x:") and x is None:
+                    x = float(t.split(":", 1)[1])
+                elif t.startswith("y:") and y is None:
+                    y = float(t.split(":", 1)[1])
+                elif t.startswith("orientation"):
+                    break
+            if x is None or y is None:
+                continue
+            self.samples += 1
+            c = obstacle_clearance(x, y)
+            if c is not None and (best is None or c < best):
+                best = c
+        if not self.samples:
+            self.reason = ("no `rosbot` poses parsed from the stream; the "
+                           "simulator may have been paused or restarted")
+        return best
 
 
 def clear_of_obstacles(x, y):
@@ -789,14 +771,14 @@ def main():
     ensure_shuttlecock(force=True)
     spawn_obstacles(force=True)
 
-    contacts = ContactMonitor(obstacle_names())
+    contacts = ClearanceMonitor(obstacle_names())
     if not contacts.available:
         print(f"  ! collision check UNAVAILABLE: {contacts.reason}\n"
-              "    trials will report contact as 'n/a'. Do not read that as a "
+              "    trials will report closest as 'n/a'. Do not read that as a "
               "clean run.", flush=True)
 
     results = []          # (verdict, why) per trial, for summarise()
-    contact_trials = []   # trials where a contact sensor actually fired
+    contact_trials = []   # trials whose closest approach was an overlap
 
     for i in range(1, n + 1):
         try:
@@ -861,8 +843,11 @@ def main():
         park_arm()
         time.sleep(1)
 
-        hit = contacts.stop()
-        if hit:
+        # Minimum footprint-to-obstacle gap over the whole trial, not just at
+        # the parked pose: a run that clipped an obstacle mid-navigation and
+        # then parked clear would otherwise look spotless.
+        min_clear = contacts.stop()
+        if min_clear is not None and min_clear <= 0.0:
             contact_trials.append(i)
 
         # Where the object actually sits relative to the arm now, and how close
@@ -897,19 +882,21 @@ def main():
                 why = f"{why}; arm move refused"
         results.append((verdict, why))
 
-        if hit is None:
-            contact = "n/a"
-        elif hit:
-            contact = "HIT " + ",".join(h.replace("obstacle_", "#") for h in hit)
+        # Minimum gap seen at any point in the trial. "n/a" means the stream
+        # gave nothing, NOT that the run was clean.
+        if min_clear is None:
+            closest = "n/a"
+        elif min_clear <= 0.0:
+            closest = f"OVERLAP {min_clear:+.3f}"
         else:
-            contact = "none"
+            closest = f"{min_clear:+.3f}m"
         vis = (f"{vis_err:.3f}m x{vis_iters}" if vis_seen else "NOT SEEN")
         after_z = f"{after[2]:.3f}" if isinstance(after, tuple) else "  ?  "
         print(f"  trial {i:2d}: {verdict:13s} "
               f"target ({tx:+.2f},{ty:+.2f}) d={math.hypot(tx,ty):.2f}m  "
               f"nav {nav:<9s} err {nav_err:.3f}  "
               f"fine {fine_d:.3f}m  vis {vis:<12s} "
-              f"reach {reach:.3f}m  clear {clear:+.3f}m  contact {contact:<12s} "
+              f"reach {reach:.3f}m  parked {clear:+.3f}m  closest {closest:<12s} "
               f"z {before[2]:.3f}->{after_z}"
               f"{'  ' + why if why else ''}", flush=True)
 
