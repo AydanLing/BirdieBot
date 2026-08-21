@@ -75,10 +75,26 @@ TARGET_GRASP_Z = 0.075
 # needed (a sphere would need +radius here to reach its centre).
 TARGET_RAY_OFFSET = 0.0
 
-# Measured top-surface height above which the shuttlecock is standing on its
-# cork. Standing it is 0.085 tall; on its side the skirt is 65 mm across, so the
-# top reads 0.052..0.065 depending on how far it has tipped. The two never
-# overlap, which makes height a far better orientation test than blob shape.
+# Height above which the shuttlecock is standing on its cork, rather than lying.
+# Re-measured 2026-08-21 at the search pose, 8+ frames per sample, three target
+# distances each:
+#     upright   0.0851 .. 0.0852     (its standing height is 0.085)
+#     lying     0.0412 .. 0.0436
+# so 0.075 clears upright by 10 mm and lying by 32 mm. The earlier note here
+# predicted 0.052..0.065 for lying, which is too high; the separation is wider
+# than advertised, not narrower.
+#
+# This is compared against ball[2], which is built from the whole-blob centroid
+# with the median depth across it. That LOOKS like a volumetric centre, and it
+# was mistaken for one -- a volumetric centre could never reach 0.075 and the
+# test would be broken for upright objects. It is not. The blob is the object's
+# VISIBLE surface, and from the bird's-eye search pose the visible surface is
+# its top, so the deprojected centroid lands on the top face. The measurement
+# and the threshold are in the same units after all.
+#
+# If you ever see this read ~0.024 for a lying shuttlecock, that is the cork
+# top with the skirt mesh missing (see ensure_shuttlecock in the harness), not
+# a classification failure.
 UPRIGHT_TOP_Z = 0.075
 
 # --- arm geometry, from open_manipulator/body.xacro ----------------------
