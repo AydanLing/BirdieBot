@@ -761,23 +761,84 @@ def target_pose(rng):
     return x, y, 0.033, (cy * qx_l, sy * qx_l, sy * qw_l, cy * qw_l)
 
 
+NAV2_NODES = ("bt_navigator", "planner_server", "controller_server",
+              "behavior_server", "velocity_smoother")
+
+
+def _activate_nav2_nodes(names):
+    """Drive stalled nav2 nodes to active, returning the ones that would not go.
+
+    nav2's lifecycle manager regularly gives up part way through bringup and
+    leaves a split state -- observed on a freshly rebooted machine at load ~17
+    with controller_server and smoother_server active while bt_navigator,
+    behavior_server, planner_server and velocity_smoother sat inactive. The
+    node logs show why: a node's change_state response does not arrive in time
+    ("failed to send response to /planner_server/change_state (timeout)"), the
+    manager treats the transition as failed, and the sequence stops there.
+
+    It is recoverable every time. `ros2 lifecycle set /<node> activate` brought
+    all four up without relaunching anything. Doing that by hand cost two full
+    ten-trial runs to notice, once as NO_SERVER and once as REJECTED, so it is
+    done here instead.
+
+    A node in `unconfigured` needs configure before activate; one in `inactive`
+    needs only activate. Both are attempted in order and the state is re-read
+    rather than trusting the set command's exit code.
+    """
+    stuck = []
+    for name in names:
+        for transition in ("configure", "activate"):
+            state = _lifecycle_state(name)
+            if _is_active(state):
+                break
+            if transition == "configure" and "unconfigured" not in state:
+                continue
+            subprocess.run(["ros2", "lifecycle", "set", f"/{name}", transition],
+                           capture_output=True, text=True, timeout=30)
+        if not _is_active(_lifecycle_state(name)):
+            stuck.append(f"{name}({_lifecycle_state(name) or 'no reply'})")
+    return stuck
+
+
+def _lifecycle_state(name):
+    """The bare state word from `ros2 lifecycle get`, e.g. "active"."""
+    try:
+        out = subprocess.run(["ros2", "lifecycle", "get", f"/{name}"],
+                             capture_output=True, text=True, timeout=15)
+        return out.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+
+def _is_active(state):
+    """True only for the active state.
+
+    Emphatically NOT `"active" in state`. `ros2 lifecycle get` prints
+    "inactive [2]" for a stalled node, and "active" is a substring of
+    "inactive", so the obvious membership test reports every stalled node as
+    healthy. That bug shipped in the first version of this check and made it
+    useless: the harness ran against a stack with bt_navigator, behavior_server
+    and velocity_smoother all inactive, reported nothing, and every goal came
+    back REJECTED.
+    """
+    return state.split()[0] == "active" if state.split() else False
+
+
 def _inactive_nav2_nodes():
     """Names of the nav2 lifecycle nodes this harness needs that are not active.
 
     Uses the CLI rather than lifecycle service clients: it is a once-per-run
     check, and shelling out keeps this free of extra rclpy plumbing.
     """
-    needed = ("bt_navigator", "planner_server", "controller_server",
-              "behavior_server", "velocity_smoother")
     bad = []
-    for name in needed:
+    for name in NAV2_NODES:
         try:
             out = subprocess.run(["ros2", "lifecycle", "get", f"/{name}"],
                                  capture_output=True, text=True, timeout=15)
         except (subprocess.TimeoutExpired, FileNotFoundError):
             bad.append(f"{name}(unreachable)")
             continue
-        if "active" not in out.stdout:
+        if not _is_active(out.stdout.strip()):
             bad.append(f"{name}({out.stdout.strip() or 'no reply'})")
     return bad
 
@@ -809,7 +870,13 @@ def main():
     # that way, all ten trials REJECTED. Check the lifecycle state too.
     inactive = _inactive_nav2_nodes()
     if inactive:
-        print(f"  ABORT: nav2 nodes are not active: {', '.join(inactive)}.\n"
+        # Recover rather than abort. This state is normal on this machine and
+        # always recoverable; aborting just moves the manual step to the user.
+        print(f"  nav2 nodes not active: {', '.join(inactive)} -- activating",
+              flush=True)
+        inactive = _activate_nav2_nodes(NAV2_NODES)
+    if inactive:
+        print(f"  ABORT: nav2 nodes would not activate: {', '.join(inactive)}.\n"
               "    The lifecycle manager stalls partway under load and leaves\n"
               "    the action server advertised but inactive, which passes a\n"
               "    wait_for_server check and then rejects every goal.\n"
