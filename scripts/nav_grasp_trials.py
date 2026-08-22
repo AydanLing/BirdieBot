@@ -71,8 +71,11 @@ STANDOFF = ARM_X + STANDOFF_REACH
 FINE_TOL = 0.030          # m, how close the fine approach drives the base
 FINE_YAW_TOL = 0.05       # rad
 FINE_TIMEOUT = 40.0       # s
-FINE_V = 0.12             # m/s during fine approach
-FINE_W = 0.5              # rad/s
+# Raised from 0.12. The fine approach only has to cover nav2's residual, which
+# lands at 0.245..0.250 m almost every trial (its xy_goal_tolerance), so this is
+# a fixed ~0.25 m of driving per trial and the speed is pure overhead.
+FINE_V = 0.25             # m/s during fine approach
+FINE_W = 1.0              # rad/s
 # The lift threshold and the PASS/FAIL/INDETERMINATE rules live in
 # repeatability_test.classify(), shared rather than duplicated here. A local
 # copy of LIFT already existed and could drift from the one the other harnesses
@@ -92,12 +95,21 @@ NAV_TIMEOUT = 120.0
 # whatever the localisation is doing cannot affect it.
 VISION_TOL = 0.025        # m, accept when the object is this close to the aim point
 VISION_ITERS = 3          # detect/move rounds before giving up
-VISION_SETTLE = 4.0       # s; the arm trajectory is 3 s and the camera rides on it,
-                          # so a shorter wait pairs a mid-swing image with a settled TF.
-                          # Measured: 1.5 s gave 9 mm detection error, 4.0 s gave 5 mm.
+VISION_SETTLE = 2.0       # s to let the arm stop before believing a frame.
+                          # Was 4.0, and it is the single largest cost in a
+                          # trial: every detection attempt pays one arm move
+                          # plus one settle, for up to 5 search bearings and up
+                          # to VISION_ITERS rounds.
+                          #
+                          # Measured detection error against settle time:
+                          # 1.5 s -> 9 mm, 4.0 s -> 5 mm. VISION_TOL is 25 mm,
+                          # so 4 s was buying 4 mm of accuracy inside a budget
+                          # that never needed it. 2.0 s keeps a margin over the
+                          # (now 1.5 s) arm trajectory so a mid-swing image is
+                          # still never paired with a settled TF.
 VISION_SAMPLES = 6        # synced frames per detection, median-combined
-MOVE_V = 0.10             # m/s during a relative correction
-MOVE_W = 0.5              # rad/s while turning to face the target
+MOVE_V = 0.22             # m/s during a relative correction
+MOVE_W = 1.0              # rad/s while turning to face the target
 MOVE_TIMEOUT = 20.0
 
 
@@ -173,7 +185,14 @@ class NavGrasp(Node):
             return
         self.frames.append((rgb, dep))
 
-    def set_arm(self, j1, j234=SEARCH_J234, secs=3):
+    def set_arm(self, j1, j234=SEARCH_J234, secs=2):
+        """Command the arm. secs must stay BELOW VISION_SETTLE.
+
+        The camera rides on link5, so a frame captured mid-swing paired with a
+        settled TF lookup deprojects to the wrong place. Trajectory 2 s against
+        a 2.0 s settle leaves the margin thin but real; do not raise this
+        without raising VISION_SETTLE with it.
+        """
         t = JointTrajectory()
         t.joint_names = ["joint1", "joint2", "joint3", "joint4"]
         p = JointTrajectoryPoint()
@@ -959,17 +978,23 @@ def main():
         gy = aim[1] - STANDOFF * math.sin(approach)
 
         contacts.start()
+        t_trial = time.time()
         nav = node.send_nav_goal(gx, gy, approach)
+        t_nav = time.time() - t_trial
 
         after_nav = node.base_pose()
         nav_err = (math.hypot(after_nav[0] - gx, after_nav[1] - gy)
                    if after_nav else float("nan"))
 
+        _t = time.time()
         fine_d, _fine_y = node.fine_approach(gx, gy, approach)
+        t_fine = time.time() - _t
 
         # Final correction on vision. Everything up to here trusts the map
         # frame; this does not.
+        _t = time.time()
         vis_err, vis_iters, vis_seen = node.visual_servo()
+        t_vis = time.time() - _t
         park_arm()
         time.sleep(1)
 
@@ -993,7 +1018,10 @@ def main():
             reach = math.hypot(rx - ARM_X, ry)
             clear = obstacle_clearance(base_truth[0], base_truth[1])
 
+        _t = time.time()
         log, grasp_status = run_grasp(f"/tmp/navgrasp_{i}.log")
+        t_grasp = time.time() - _t
+        t_total = time.time() - t_trial
         after = probe_pose("shuttlecock")
         m = re.search(r"gripper (?:at|stalled at) ([-\d.]+)", log)
 
@@ -1027,7 +1055,8 @@ def main():
               f"nav {nav:<9s} err {nav_err:.3f}  "
               f"fine {fine_d:.3f}m  vis {vis:<12s} "
               f"reach {reach:.3f}m  parked {clear:+.3f}m  closest {closest:<12s} "
-              f"z {before[2]:.3f}->{after_z}"
+              f"z {before[2]:.3f}->{after_z}  "
+              f"[nav {t_nav:.0f} fine {t_fine:.0f} vis {t_vis:.0f} grasp {t_grasp:.0f} = {t_total:.0f}s]"
               f"{'  ' + why if why else ''}", flush=True)
 
     summarise(results, label="picked up after navigating")

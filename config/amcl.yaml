@@ -112,6 +112,26 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
+      # Kept TIGHT at 0.25. Loosening to 0.50 was tried and measured worse.
+      #
+      # The theory was sound: this harness never relies on where nav2 stops,
+      # since a fine approach and then a vision stage both re-close the gap, so
+      # nav2 converging precisely is wasted time. Navigation was 35 s of an
+      # 85 s trial, 41%, more than fine approach, vision and grasp combined.
+      #
+      # Measured over 5 trials each, same seed, same machine:
+      #     xy_goal_tolerance 0.25   5/5 picked up, mean 85 s (nav 35 s)
+      #     xy_goal_tolerance 0.50   4/5 picked up, mean 81 s (nav 23 s)
+      # 4 s is inside the run-to-run noise here -- one trial swung 121 s on a
+      # grasp outlier -- and it cost a pick. With 0.50, nav2 used the whole
+      # budget every time (residual 0.411..0.498 m, never less), so the fine
+      # approach had to close double the distance and left the object at the
+      # outer edge of the reach band. The failure was "vis NOT SEEN" at reach
+      # 0.207 m against a 0.218 m limit: the search sweep could not find an
+      # object that far out.
+      #
+      # The speed that DID pay off was elsewhere: FINE_V, MOVE_V and
+      # VISION_SETTLE in nav_grasp_trials.py.
       xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
     FollowPath:
@@ -127,7 +147,10 @@ controller_server:
       vx_std: 0.2
       vy_std: 0.2
       wz_std: 0.4
-      vx_max: 0.5
+      # Raised 0.5 -> 0.8. MPPI is capped by velocity_smoother's max_velocity
+      # downstream, so both have to move together or the smoother silently
+      # clamps whatever MPPI plans.
+      vx_max: 0.8
       vx_min: -0.35
       # Inert. motion_model is DiffDrive, so MPPI only ever samples (vx, wz)
       # and vy_max / vy_std are never consulted. Verified rather than assumed:
@@ -146,7 +169,7 @@ controller_server:
       # isotropic. A real ROSbot XL has physical rollers and would strafe, so
       # Omni would work on hardware while failing in simulation.
       vy_max: 0.5
-      wz_max: 1.9
+      wz_max: 2.5
       iteration_count: 1
       prune_distance: 1.7
       transform_tolerance: 0.1
@@ -542,9 +565,9 @@ velocity_smoother:
     stamp_smoothed_velocity_with_smoothing_time: False
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.5, 0.5, 2.0]
+    max_velocity: [0.8, 0.8, 2.5]   # matches MPPI's vx_max/wz_max above
     min_velocity: [-0.5, -0.5, -2.0]
-    max_accel: [2.5, 2.5, 3.2]
+    max_accel: [3.5, 3.5, 4.0]      # raised with the velocity ceiling
     max_decel: [-2.5, -2.5, -3.2]
     odom_topic: "odom"
     odom_duration: 0.1
