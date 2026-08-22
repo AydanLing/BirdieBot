@@ -768,6 +768,31 @@ def main():
 
     rclpy.init()
     node = NavGrasp()
+
+    # Pre-flight: refuse to start without the navigation action server.
+    #
+    # nav2's lifecycle manager can leave bt_navigator and behavior_server stuck
+    # "unconfigured" when transitions time out under load, and the failure is
+    # quiet -- planner_server and controller_server can report active while
+    # /navigate_to_pose is not advertised at all. A full 10-trial run was spent
+    # that way: every goal returned NO_SERVER, every trial scored
+    # INDETERMINATE, and roughly fifteen minutes of simulator time measured
+    # nothing. The per-trial handling was correct, but it should not take ten
+    # trials to learn the stack is not up.
+    #
+    # Checking planner_server is NOT sufficient; check the server this harness
+    # actually calls.
+    if not node.nav.wait_for_server(timeout_sec=20.0):
+        print("  ABORT: /navigate_to_pose is not available after 20 s.\n"
+              "    Check `ros2 lifecycle get /bt_navigator` -- if it reports\n"
+              "    unconfigured or inactive, the lifecycle manager did not\n"
+              "    finish. Relaunch navigation_launch.py once the machine is\n"
+              "    quieter and wait for /navigate_to_pose in `ros2 action list`.",
+              flush=True)
+        node.destroy_node()
+        rclpy.try_shutdown()
+        return 1
+
     ensure_shuttlecock(force=True)
     spawn_obstacles(force=True)
 
@@ -914,4 +939,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
