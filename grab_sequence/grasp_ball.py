@@ -593,16 +593,37 @@ def main():
     if not ready.wait_for_server(timeout_sec=30.0):
         node.get_logger().error("manipulator_controller action server never appeared")
         return
-    # The server existing is necessary but not sufficient: MoveIt's
-    # SimpleControllerManager builds its own action client, and that one can
-    # still be unconnected when the first move goes out. Our client connecting
-    # says nothing about MoveIt's, so give the manager a moment to catch up.
-    # Still far cheaper than the fixed 13 s this replaced.
-    node.settle(3.0)
+    # No fixed wait here any more.
+    #
+    # MoveIt's SimpleControllerManager builds its OWN action client, and that
+    # one can still be unconnected when the first move goes out, which aborts it
+    # with "Action client not connected to action server" and used to kill about
+    # half of all runs at the first search pose. Our own client connecting says
+    # nothing about MoveIt's, and there is no way to observe MoveIt's from here,
+    # so this was handled by sleeping 3 s and hoping -- which every run paid for,
+    # including the majority that never needed it.
+    #
+    # run() now retries instead. The cost moves onto the runs that actually hit
+    # the race, and a healthy start pays nothing. This also covers the case the
+    # fixed sleep never could: a manager that takes longer than 3 s.
 
-    def run(component):
-        plan = component.plan()
-        return bool(plan) and bool(moveit.execute(plan.trajectory, controllers=[]))
+    def run(component, attempts=4, backoff=1.0):
+        """Plan and execute, retrying while MoveIt's controller client connects.
+
+        Only the FIRST move of a run is realistically affected -- once the
+        manager has connected it stays connected -- but retrying every move is
+        harmless and costs nothing when they succeed.
+        """
+        for attempt in range(attempts):
+            plan = component.plan()
+            if plan and moveit.execute(plan.trajectory, controllers=[]):
+                return True
+            if attempt < attempts - 1:
+                node.get_logger().warn(
+                    f"arm move failed (attempt {attempt + 1}/{attempts}); "
+                    "MoveIt's controller client may still be connecting")
+                node.settle(backoff)
+        return False
 
     # Open is the SRDF "Open" state. Close drives to the CAD claw's lower stop
     # rather than the SRDF's -0.009, which left a 26 mm gap between the claw

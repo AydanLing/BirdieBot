@@ -812,8 +812,16 @@ def _activate_nav2_nodes(names):
                 break
             if transition == "configure" and "unconfigured" not in state:
                 continue
-            subprocess.run(["ros2", "lifecycle", "set", f"/{name}", transition],
-                           capture_output=True, text=True, timeout=30)
+            try:
+                subprocess.run(["ros2", "lifecycle", "set", f"/{name}", transition],
+                               capture_output=True, text=True, timeout=30)
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                # A node wedged badly enough that its change_state service never
+                # answers will hang this call. That is the very condition being
+                # recovered from, so it must not raise out of the recovery and
+                # kill the run -- the state is re-read below and the node is
+                # reported stuck if it did not come up.
+                pass
         if not _is_active(_lifecycle_state(name)):
             stuck.append(f"{name}({_lifecycle_state(name) or 'no reply'})")
     return stuck
