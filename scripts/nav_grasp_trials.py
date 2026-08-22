@@ -761,6 +761,27 @@ def target_pose(rng):
     return x, y, 0.033, (cy * qx_l, sy * qx_l, sy * qw_l, cy * qw_l)
 
 
+def _inactive_nav2_nodes():
+    """Names of the nav2 lifecycle nodes this harness needs that are not active.
+
+    Uses the CLI rather than lifecycle service clients: it is a once-per-run
+    check, and shelling out keeps this free of extra rclpy plumbing.
+    """
+    needed = ("bt_navigator", "planner_server", "controller_server",
+              "behavior_server", "velocity_smoother")
+    bad = []
+    for name in needed:
+        try:
+            out = subprocess.run(["ros2", "lifecycle", "get", f"/{name}"],
+                                 capture_output=True, text=True, timeout=15)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            bad.append(f"{name}(unreachable)")
+            continue
+        if "active" not in out.stdout:
+            bad.append(f"{name}({out.stdout.strip() or 'no reply'})")
+    return bad
+
+
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     import random
@@ -782,6 +803,23 @@ def main():
     #
     # Checking planner_server is NOT sufficient; check the server this harness
     # actually calls.
+    # wait_for_server is necessary but NOT sufficient. bt_navigator advertises
+    # /navigate_to_pose while still inactive and then rejects every goal with
+    # "Action server is inactive. Rejecting the goal." -- a whole run was spent
+    # that way, all ten trials REJECTED. Check the lifecycle state too.
+    inactive = _inactive_nav2_nodes()
+    if inactive:
+        print(f"  ABORT: nav2 nodes are not active: {', '.join(inactive)}.\n"
+              "    The lifecycle manager stalls partway under load and leaves\n"
+              "    the action server advertised but inactive, which passes a\n"
+              "    wait_for_server check and then rejects every goal.\n"
+              "    Fix with:  ros2 lifecycle set /<node> activate\n"
+              "    or relaunch navigation_launch.py on a quieter machine.",
+              flush=True)
+        node.destroy_node()
+        rclpy.try_shutdown()
+        return 1
+
     if not node.nav.wait_for_server(timeout_sec=20.0):
         print("  ABORT: /navigate_to_pose is not available after 20 s.\n"
               "    Check `ros2 lifecycle get /bt_navigator` -- if it reports\n"
