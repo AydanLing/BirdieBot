@@ -870,6 +870,25 @@ def _inactive_nav2_nodes():
     return bad
 
 
+def _wait_for_transform(target, source, timeout=20.0):
+    """True once target<-source resolves. Its own node, so it is independent."""
+    probe = Node("nav_grasp_tf_probe")
+    buf = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(buf, probe)
+    end = time.time() + timeout
+    ok = False
+    while rclpy.ok() and time.time() < end:
+        rclpy.spin_once(probe, timeout_sec=0.1)
+        try:
+            buf.lookup_transform(target, source, rclpy.time.Time())
+            ok = True
+            break
+        except Exception:
+            pass
+    probe.destroy_node()
+    return ok
+
+
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     import random
@@ -877,6 +896,33 @@ def main():
 
     rclpy.init()
     node = NavGrasp()
+
+    # Pre-flight: map->base_link must exist, or nav2 cannot have come up.
+    #
+    # nav2's global_costmap refuses to activate without this transform
+    # ("Failed to activate global_costmap because transform..."), which fails
+    # planner_server, which makes the lifecycle manager abandon the rest of the
+    # bringup. That is the origin of the half-active stacks seen all through
+    # this project -- controller_server active while bt_navigator, planner_server
+    # and behavior_server sat inactive.
+    #
+    # The transform comes from AMCL, and AMCL does not publish it until it has
+    # an initial pose. So the launch ORDER matters and is easy to get wrong:
+    #
+    #     gazebo -> scan filter -> localization -> SEED /initialpose -> navigation
+    #
+    # Seeding after launching navigation, which is the intuitive order, races
+    # the costmap's activation timeout. Seeding first brought all six nodes to
+    # active [3] on the first attempt, where every previous run this session had
+    # needed manual recovery.
+    if not _wait_for_transform("map", "base_link", timeout=20.0):
+        print("  ABORT: no map->base_link transform.\n"
+              "    AMCL has no initial pose, so nav2's global_costmap cannot\n"
+              "    activate. Publish /initialpose BEFORE launching\n"
+              "    navigation_launch.py, then retry.", flush=True)
+        node.destroy_node()
+        rclpy.try_shutdown()
+        return 1
 
     # Pre-flight: refuse to start without the navigation action server.
     #
