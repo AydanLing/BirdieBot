@@ -216,6 +216,8 @@ class BallGrasper(Node):
 
         self.camera_info = None
         self.samples = []
+        self.axis_from_pca_frames = 0
+        self.axis_from_depth_frames = 0
         self.collecting = False
         self.collect_start = None
 
@@ -343,7 +345,88 @@ class BallGrasper(Node):
                 ang = math.atan2(b[1] - a[1], b[0] - a[0])
                 c2, s2 = math.cos(ang), math.sin(ang)
 
+        if c2 is None:
+            ang = self._axis_from_depth(valid, depth_img, depth_msg.header, tf)
+            if ang is not None:
+                c2, s2 = math.cos(ang), math.sin(ang)
+                self.axis_from_depth_frames += 1
+        elif c2 is not None:
+            self.axis_from_pca_frames += 1
+
         self.samples.append((centre[0], centre[1], centre[2], c2, s2))
+
+    def _axis_from_depth(self, valid, depth_img, header, tf):
+        """Recover the object's axis from the slope of its top surface.
+
+        The silhouette PCA above needs a clearly elongated outline, and a
+        shuttlecock lying down does not reliably have one. Measured at four
+        headings, its eccentricity ran 0.53..0.78 against a 0.75 gate, so the
+        axis resolved on some headings and not others -- roughly half of trials
+        came back "upright (no usable axis)" and got no wrist alignment at all,
+        even though the height test correctly called them "on its side".
+
+        The depth image does not have that problem, because the object is a
+        cone. Lying down, its visible top rises from the cork end (~26 mm) to
+        the skirt end (~65 mm) over about 85 mm of length, so the surface has a
+        pronounced tilt whose downhill-to-uphill direction IS the cork-to-skirt
+        axis. Fitting z = ax + by + c over the blob's deprojected points and
+        taking atan2(b, a) recovers it, and the gradient carries the sense for
+        free -- uphill is the fat end -- which the PCA had to infer separately
+        by comparing silhouette widths.
+
+        Measured against Gazebo ground truth at four headings:
+
+            truth  +89.7   depth +105.0   slope 0.53   err 15.3 deg
+            truth +124.4   depth +125.9   slope 0.42   err  1.5 deg
+            truth -179.3   depth +172.2   slope 0.46   err  8.5 deg
+            truth   -5.7   depth   +7.1   slope 0.46   err 12.9 deg   (PCA failed here)
+
+        So it always resolves, to within about 15 deg. That is looser than a
+        good PCA fit, which is why this runs only as a FALLBACK: when the
+        silhouette really is elongated the existing path is kept untouched, and
+        this fills in the headings that used to get nothing. A 15 deg error on
+        an 85 mm object displaces its ends by about 11 mm, well inside what the
+        claw's wrap tolerates.
+
+        MIN_SLOPE rejects a flat fit. A shuttlecock standing on its cork
+        presents a roughly level top, so its gradient direction is noise, and
+        that is exactly the case that must NOT produce an axis.
+        """
+        MIN_SLOPE = 0.20
+        MIN_POINTS = 50
+        ys, xs = np.nonzero(valid)
+        if len(xs) < MIN_POINTS:
+            return None
+        fx, fy = self.camera_info.k[0], self.camera_info.k[4]
+        cx, cy = self.camera_info.k[2], self.camera_info.k[5]
+        ds = depth_img[valid]
+
+        # Deproject in bulk. Doing this per-pixel through _to_base would mean
+        # thousands of PointStamped transforms per frame inside the callback.
+        x_cam = ds
+        y_cam = -(xs - cx) / fx * ds
+        z_cam = -(ys - cy) / fy * ds
+        q = tf.transform.rotation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        pitch = math.asin(max(-1.0, min(1.0, 2.0 * (q.w * q.y - q.z * q.x))))
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        cyw, syw = math.cos(yaw), math.sin(yaw)
+        # rotate by pitch then yaw; roll is ~0 for this mount
+        xr = x_cam * cp + z_cam * sp
+        zr = -x_cam * sp + z_cam * cp
+        bx = tf.transform.translation.x + xr * cyw - y_cam * syw
+        by = tf.transform.translation.y + xr * syw + y_cam * cyw
+        bz = tf.transform.translation.z + zr
+
+        A = np.c_[bx - bx.mean(), by - by.mean(), np.ones(len(bx))]
+        try:
+            coef, *_ = np.linalg.lstsq(A, bz - bz.mean(), rcond=None)
+        except np.linalg.LinAlgError:
+            return None
+        if math.hypot(coef[0], coef[1]) < MIN_SLOPE:
+            return None
+        return math.atan2(coef[1], coef[0])
 
     def _to_base(self, u, v, d, header, tf, ray_offset=0.0):
         """Deproject a pixel at depth d and express it in base_link."""
@@ -604,7 +687,9 @@ def main():
                     continue
                 node.get_logger().info(
                     f"Shuttlecock seen at base_link ({found[0]:.3f}, {found[1]:.3f})"
-                    + (f", long axis {math.degrees(axis):.0f} deg" if axis is not None
+                    + (f", long axis {math.degrees(axis):.0f} deg"
+                       f" [pca {node.axis_from_pca_frames}/depth "
+                       f"{node.axis_from_depth_frames} frames]" if axis is not None
                        else ", upright (no usable axis)")
                 )
                 if arm_joints_for(found[0], found[1], TARGET_GRASP_Z) is not None:
