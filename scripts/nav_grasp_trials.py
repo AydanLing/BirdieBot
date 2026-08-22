@@ -897,6 +897,27 @@ def main():
     rclpy.init()
     node = NavGrasp()
 
+    # Pre-flight: stop the lifecycle managers killing the stack mid-run.
+    #
+    # Each manager holds a bond heartbeat with every node it manages and tears
+    # the WHOLE stack down when one is missed. The 4000 ms default fires under
+    # ordinary trial load here:
+    #
+    #   CRITICAL FAILURE: SERVER smoother_server IS DOWN after not receiving a
+    #   heartbeat for 4000 ms. Shutting down related nodes.
+    #
+    # That is why nav2 kept ending up half-active, and why nodes deactivated
+    # again minutes after being activated by hand. The node genuinely missed
+    # its window -- the machine was saturated -- so this is a false positive
+    # that costs a whole run.
+    #
+    # It has to be done at runtime. nav2's launch files build the managers with
+    # parameters=[{autostart}, {node_names}] and never pass the params file, so
+    # a lifecycle_manager_* block in amcl.yaml is silently ignored.
+    for mgr in ("lifecycle_manager_navigation", "lifecycle_manager_localization"):
+        subprocess.run(["ros2", "param", "set", f"/{mgr}", "bond_timeout", "0.0"],
+                       capture_output=True, text=True, timeout=20)
+
     # Pre-flight: map->base_link must exist, or nav2 cannot have come up.
     #
     # nav2's global_costmap refuses to activate without this transform

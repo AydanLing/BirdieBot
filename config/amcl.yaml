@@ -138,7 +138,18 @@ controller_server:
       plugin: "nav2_mppi_controller::MPPIController"
       time_steps: 56
       model_dt: 0.05
-      batch_size: 2000
+      # 2000 -> 1000. MPPI was missing its control loop badly: "Control loop
+      # missed its desired rate of 20.0000 Hz. Current loop rate is 7.57", i.e.
+      # about a third of target. A starved controller steers poorly, which is
+      # where the 146 collision reports, 24 "Failed to make progress", 15 spin
+      # recoveries and one 120 s nav timeout in a 5-trial batch came from.
+      #
+      # It is contention, not MPPI being expensive in isolation:
+      # controller_server itself only drew 29.6% CPU while gz sim server took
+      # 127% and the GUI another 79% on an 8-core box at load 18. Halving the
+      # batch halves MPPI's share of what is left. 2000 x 56 time_steps is
+      # 112k trajectory points per iteration at 20 Hz.
+      batch_size: 1000
       ax_max: 3.0
       ax_min: -3.0
       ay_max: 3.0
@@ -673,3 +684,31 @@ loopback_simulator:
     scan_angle_max: 3.1415
     scan_angle_increment: 0.02617
     scan_use_inf: true
+
+# NOTE ON bond_timeout, which cannot be set from this file.
+#
+# The lifecycle managers monitor each managed node with a bond heartbeat and
+# tear the whole stack down when one is missed. At the 4000 ms default that
+# fires on this machine under ordinary trial load:
+#
+#   Have not received a heartbeat from smoother_server.
+#   CRITICAL FAILURE: SERVER smoother_server IS DOWN after not receiving a
+#   heartbeat for 4000 ms. Shutting down related nodes.
+#
+# That is the origin of the half-active nav2 stacks seen throughout this
+# project -- controller_server active while bt_navigator, behavior_server and
+# velocity_smoother sit inactive -- and of nodes silently deactivating minutes
+# after being activated by hand. It is not a nav2 defect: the node really did
+# miss its window, because the machine was saturated (gz sim server 127% plus
+# GUI 79% on 8 cores, with MPPI missing its 20 Hz control loop at 7.57 Hz).
+#
+# A lifecycle_manager_* section here does NOT work. nav2's own launch files
+# construct those nodes with parameters=[{autostart}, {node_names}] and never
+# pass configured_params, so anything written for them in this file is silently
+# ignored -- verified by setting it here and reading back the default 4.0.
+#
+# It CAN be set at runtime, which nav_grasp_trials.py now does in its
+# pre-flight:
+#     ros2 param set /lifecycle_manager_navigation bond_timeout 0.0
+  ros__parameters:
+    bond_timeout: 0.0
