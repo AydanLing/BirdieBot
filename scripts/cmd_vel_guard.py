@@ -41,19 +41,23 @@ TIME_HORIZON = 1.2           # seconds to look ahead, matches time_before_collis
 SIM_STEP = 0.1               # forward-simulation timestep
 SCAN_TIMEOUT = 2.0           # seconds without a scan before failing safe
 MIN_SCALE = 0.15             # below this, stop outright rather than crawl
-# The lidar sees the robot's own chassis and arm. Measured against a clear
-# floor: zero returns inside 0.22 m, but 102 returns between 0.22 and 0.30 m,
-# which are the chassis corners (hypot(0.167,0.135)=0.215) and the arm base at
-# x=+0.065. Without this filter the forward simulation steps 2 cm, those self
-# hits land inside the footprint, and every command is refused as an immediate
-# collision. Anything nearer than this is treated as the robot seeing itself.
+# This reads /scan_filtered, not /scan.
 #
-# The cost is real: a genuine obstacle closer than SELF_FILTER is invisible.
-# At 0.22 m footprint radius that leaves only ~8 cm of true blind margin, and
-# something that close is already nearly touching. A proper fix is a footprint
-# polygon filter on /scan rather than a radius, which is what nav2's laser
-# filter does.
-SELF_FILTER = 0.30
+# The lidar sees the robot's own arm, and unfiltered those returns land inside
+# the footprint, so the forward simulation refuses every command as an
+# immediate collision. That used to be handled here by discarding everything
+# inside a 0.30 m radius, with a note that "a proper fix is a footprint polygon
+# filter on /scan rather than a radius". scan_self_filter.py is that fix, so
+# the radius is gone.
+#
+# It was worth removing rather than leaving alone. The radius was blind to
+# genuine obstacles inside 0.30 m -- against a 0.22 m footprint that left only
+# about 8 cm of real margin, in the one region where stopping matters most. The
+# footprint test drops only returns whose endpoint is inside the chassis, so a
+# real obstacle 0.25 m away is now seen instead of discarded.
+#
+# Measured in open space: /scan carried 104 returns under 0.45 m and
+# /scan_filtered carried 0, keeping 2896 of 3000 beams.
 
 
 class CmdVelGuard(Node):
@@ -64,7 +68,7 @@ class CmdVelGuard(Node):
         self.points = []          # obstacle points in base_link
         self.last_scan = None
         self.pub = self.create_publisher(TwistStamped, "/cmd_vel", 10)
-        self.create_subscription(LaserScan, "/scan", self.on_scan, 10)
+        self.create_subscription(LaserScan, "/scan_filtered", self.on_scan, 10)
         self.create_subscription(TwistStamped, "/cmd_vel_smoothed", self.on_cmd, 10)
         self.get_logger().info(
             f"guarding /cmd_vel: radius={ROBOT_RADIUS} horizon={TIME_HORIZON}s"
@@ -91,8 +95,7 @@ class CmdVelGuard(Node):
                 lx, ly = r * math.cos(ang), r * math.sin(ang)
                 bx = t.x + lx * cy - ly * sy
                 by = t.y + lx * sy + ly * cy
-                if bx * bx + by * by > SELF_FILTER * SELF_FILTER:
-                    pts.append((bx, by))
+                pts.append((bx, by))
             ang += msg.angle_increment
         self.points = pts
         self.last_scan = self.get_clock().now()

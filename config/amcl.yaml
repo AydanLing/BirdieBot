@@ -231,7 +231,16 @@ local_costmap:
         mark_threshold: 0
         observation_sources: scan pointcloud pointcloud_clearing
         scan:
-          topic: /scan
+          # /scan_filtered, not /scan. The lidar sees the arm: 104 beams land
+          # inside the chassis footprint, dead ahead in base_link (the laser
+          # frame is yaw-180, so its "+-180 deg" is the robot's front). With
+          # obstacle_min_range 0.0 those were marked as lethal cells a few
+          # centimetres in front of the robot, travelling with it, and MPPI
+          # reported collisions on trajectories that were actually clear.
+          # scan_self_filter.py drops them by footprint test; measured in open
+          # space, /scan had 104 returns under 0.45 m and /scan_filtered had 0,
+          # keeping 2896 of 3000 beams.
+          topic: /scan_filtered
           max_obstacle_height: 2.0
           clearing: True
           marking: True
@@ -321,7 +330,16 @@ global_costmap:
         enabled: True
         observation_sources: scan pointcloud pointcloud_clearing
         scan:
-          topic: /scan
+          # /scan_filtered, not /scan. The lidar sees the arm: 104 beams land
+          # inside the chassis footprint, dead ahead in base_link (the laser
+          # frame is yaw-180, so its "+-180 deg" is the robot's front). With
+          # obstacle_min_range 0.0 those were marked as lethal cells a few
+          # centimetres in front of the robot, travelling with it, and MPPI
+          # reported collisions on trajectories that were actually clear.
+          # scan_self_filter.py drops them by footprint test; measured in open
+          # space, /scan had 104 returns under 0.45 m and /scan_filtered had 0,
+          # keeping 2896 of 3000 beams.
+          topic: /scan_filtered
           max_obstacle_height: 2.0
           clearing: True
           marking: True
