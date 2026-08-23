@@ -37,6 +37,7 @@ Publishes /scan_filtered. Point the costmap observation sources at that.
 
 import math
 
+import numpy as np
 import rclpy
 import tf2_ros
 from rclpy.node import Node
@@ -64,6 +65,7 @@ class ScanSelfFilter(Node):
         self.buf = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(self.buf, self)
         self.tf = None          # base_link <- laser, cached; it is static
+        self._ang = self._cos = self._sin = None   # beam angle table, cached
         self.dropped = 0
         self.kept = 0
         # RELIABLE, matching the gz bridge's /scan, so /scan_filtered is a
@@ -110,22 +112,31 @@ class ScanSelfFilter(Node):
             return
         tx, ty, c, s = tf
 
-        out = list(msg.ranges)
-        ang = msg.angle_min
-        for i, r in enumerate(msg.ranges):
-            if math.isfinite(r) and msg.range_min < r < MAX_SELF_RANGE:
-                lx, ly = r * math.cos(ang), r * math.sin(ang)
-                bx = tx + lx * c - ly * s
-                by = ty + lx * s + ly * c
-                if (BODY_X_MIN - MARGIN <= bx <= BODY_X_MAX + MARGIN
-                        and abs(by) <= BODY_Y_ABS + MARGIN):
-                    out[i] = float("inf")
-                    self.dropped += 1
-                else:
-                    self.kept += 1
-            ang += msg.angle_increment
+        # Vectorised deliberately. The obvious per-beam Python loop cost 29% of
+        # a core on its own: 3000 beams with trig and a bounds test each, at the
+        # scan rate, on a machine that is already the bottleneck for everything
+        # else in this project. numpy does the same arithmetic in one pass.
+        r = np.asarray(msg.ranges, dtype=np.float64)
+        n = r.size
+        if self._ang is None or self._ang.size != n:
+            self._ang = msg.angle_min + np.arange(n) * msg.angle_increment
+            self._cos = np.cos(self._ang)
+            self._sin = np.sin(self._ang)
 
-        msg.ranges = out
+        near = np.isfinite(r) & (r > msg.range_min) & (r < MAX_SELF_RANGE)
+        if near.any():
+            lx = r[near] * self._cos[near]
+            ly = r[near] * self._sin[near]
+            bx = tx + lx * c - ly * s
+            by = ty + lx * s + ly * c
+            hit = ((bx >= BODY_X_MIN - MARGIN) & (bx <= BODY_X_MAX + MARGIN)
+                   & (np.abs(by) <= BODY_Y_ABS + MARGIN))
+            idx = np.flatnonzero(near)[hit]
+            r[idx] = np.inf
+            self.dropped += int(hit.sum())
+            self.kept += int(near.sum() - hit.sum())
+
+        msg.ranges = r.tolist()
         self.pub.publish(msg)
 
     def _report(self):

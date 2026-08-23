@@ -30,6 +30,7 @@ robot_radius already used by both costmaps in amcl.yaml.
 
 import math
 
+import numpy as np
 import rclpy
 import tf2_ros
 from geometry_msgs.msg import TwistStamped
@@ -65,7 +66,8 @@ class CmdVelGuard(Node):
         super().__init__("cmd_vel_guard")
         self.buf = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(self.buf, self)
-        self.points = []          # obstacle points in base_link
+        self.points = None
+        self._ang = self._cos = self._sin = None   # beam angle table, cached          # obstacle points in base_link
         self.last_scan = None
         self.pub = self.create_publisher(TwistStamped, "/cmd_vel", 10)
         self.create_subscription(LaserScan, "/scan_filtered", self.on_scan, 10)
@@ -88,35 +90,56 @@ class CmdVelGuard(Node):
                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         cy, sy = math.cos(yaw), math.sin(yaw)
 
-        pts = []
-        ang = msg.angle_min
-        for r in msg.ranges:
-            if math.isfinite(r) and msg.range_min < r < msg.range_max:
-                lx, ly = r * math.cos(ang), r * math.sin(ang)
-                bx = t.x + lx * cy - ly * sy
-                by = t.y + lx * sy + ly * cy
-                pts.append((bx, by))
-            ang += msg.angle_increment
-        self.points = pts
+        r = np.asarray(msg.ranges, dtype=np.float64)
+        n = r.size
+        if self._ang is None or self._ang.size != n:
+            self._ang = msg.angle_min + np.arange(n) * msg.angle_increment
+            self._cos = np.cos(self._ang)
+            self._sin = np.sin(self._ang)
+
+        ok = np.isfinite(r) & (r > msg.range_min) & (r < msg.range_max)
+        lx = r[ok] * self._cos[ok]
+        ly = r[ok] * self._sin[ok]
+        # (N, 2) of obstacle points in base_link, ready for the broadcast in
+        # time_to_collision. Kept as one array rather than a list of tuples so
+        # the collision test never has to touch the Python interpreter per point.
+        self.points = np.column_stack((t.x + lx * cy - ly * sy,
+                                       t.y + lx * sy + ly * cy))
+        pts = self.points
         self.last_scan = self.get_clock().now()
         self.get_logger().info(f"scan ok: {len(pts)} points", once=True)
 
     def time_to_collision(self, vx, vy, wz):
         """Earliest time within the horizon at which the footprint hits a point."""
-        if not self.points:
+        if self.points is None or len(self.points) == 0:
             return None
-        x = y = th = 0.0
+
+        # The pose sequence is integrated in Python -- it is 12 steps and each
+        # depends on the last -- but the collision test against every scan point
+        # is done as one broadcast per step. The fully nested version cost 35%
+        # of a core: 12 steps x ~2900 points x 20 Hz is ~700k interpreted
+        # distance checks a second, on the machine that also runs Gazebo.
         steps = int(TIME_HORIZON / SIM_STEP)
-        for i in range(1, steps + 1):
-            # integrate the holonomic base forward one step
+        x = y = th = 0.0
+        xs = np.empty(steps)
+        ys = np.empty(steps)
+        for i in range(steps):
             x += (vx * math.cos(th) - vy * math.sin(th)) * SIM_STEP
             y += (vx * math.sin(th) + vy * math.cos(th)) * SIM_STEP
             th += wz * SIM_STEP
-            r2 = ROBOT_RADIUS * ROBOT_RADIUS
-            for px, py in self.points:
-                if (px - x) ** 2 + (py - y) ** 2 < r2:
-                    return i * SIM_STEP
-        return None
+            xs[i] = x
+            ys[i] = y
+
+        px = self.points[:, 0]
+        py = self.points[:, 1]
+        r2 = ROBOT_RADIUS * ROBOT_RADIUS
+        # (steps, N) squared distances; argmax on the any-hit mask gives the
+        # earliest colliding step, matching the old loop's return-on-first-hit.
+        d2 = (px[None, :] - xs[:, None]) ** 2 + (py[None, :] - ys[:, None]) ** 2
+        hit = (d2 < r2).any(axis=1)
+        if not hit.any():
+            return None
+        return float(np.argmax(hit) + 1) * SIM_STEP
 
     def on_cmd(self, msg):
         out = TwistStamped()
