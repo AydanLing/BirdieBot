@@ -67,7 +67,7 @@ class D(Node):
         for _ in range(5): s.cmd.publish(TwistStamped()); s.spin(0.05)
 
 rclpy.init(); d=D(); d.spin(3.0)
-subprocess.run(["gz","service","-s","/world/husarion_world/set_pose","--reqtype","gz.msgs.Pose",
+subprocess.run(["gz","service","-s",f"/world/{WORLD}/set_pose","--reqtype","gz.msgs.Pose",
   "--reptype","gz.msgs.Boolean","--timeout","8000","--req",
   'name: "rosbot", position: {x: 0, y: 0, z: 0}, orientation: {w: 1.0}'],capture_output=True,timeout=20)
 time.sleep(4)

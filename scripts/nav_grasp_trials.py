@@ -57,7 +57,7 @@ from tf2_geometry_msgs import do_transform_point
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from repeatability_test import (ARM_X, UNKNOWN, GzQueryFailed,  # noqa: E402
+from repeatability_test import (ARM_X, UNKNOWN, WORLD, GzQueryFailed,  # noqa: E402
                                 WorldMismatch, classify, ensure_shuttlecock,
                                 gz_run, model_list, park_arm, probe_pose,
                                 remove_model, run_grasp, set_pose, skirt_centre,
@@ -515,7 +515,7 @@ class NavGrasp(Node):
 
 
 # --- obstacles ------------------------------------------------------------
-# Deliberately absent from husarion_world.yaml, so nav2 has to discover them
+# Deliberately absent from the map, so nav2 has to discover them
 # from live sensors rather than plan around known map geometry.
 #
 # Placed at 0.85..1.15 m, inside the annulus targets are drawn from, so they
@@ -665,7 +665,8 @@ class ClearanceMonitor:
     is the trap the original static-pose comparison fell into.
     """
 
-    TOPIC = "/world/husarion_world/dynamic_pose/info"
+    # World name follows the running simulator; see repeatability_test.WORLD.
+    TOPIC = f"/world/{WORLD}/dynamic_pose/info"
 
     def __init__(self, names):
         self.names = list(names)

@@ -27,7 +27,29 @@ import subprocess
 import sys
 import time
 
-WORLD = "husarion_world"
+def _detect_world(default="husarion_world"):
+    """Ask Gazebo which world is running instead of hardcoding it.
+
+    Every gz service path in this file embeds the world name, so a hardcoded
+    one silently breaks every spawn, removal and pose query the moment the
+    world changes -- and it breaks by returning success-looking output, which
+    is the failure mode this harness has been bitten by repeatedly.
+
+    Falls back to the default when gz is not running, so importing this module
+    without a simulator still works.
+    """
+    try:
+        out = subprocess.run(["gz", "topic", "-l"], capture_output=True,
+                             text=True, timeout=15)
+        for ln in out.stdout.splitlines():
+            if ln.startswith("/world/"):
+                return ln.split("/")[2]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return default
+
+
+WORLD = os.environ.get("GZ_WORLD") or _detect_world()
 
 
 def _arm_x():
