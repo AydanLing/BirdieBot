@@ -763,13 +763,33 @@ def clear_of_obstacles(x, y):
                for ox, oy, *_ in OBSTACLES)
 
 
+# Where shuttlecocks are allowed to land, in the badminton court world.
+#
+# Sampled over a RECTANGLE, not an annulus. The court is long and narrow --
+# 13.4 x 6.1 m -- so a radius that reaches a useful distance along x would put
+# the target through the sideline and into the wall along y. The old world was
+# open enough that an annulus was fine; this one is not.
+#
+# Bounds are the court inset by TARGET_MARGIN, which has to cover the robot
+# radius (0.22) plus the standoff pose the robot parks at (0.217 short of the
+# target) plus room to turn. Otherwise nav2 is handed goals inside the wall's
+# inflation and refuses them.
+TARGET_X_ABS = 5.6        # court half-length 6.70 less margin
+TARGET_Y_ABS = 2.3        # court half-width  3.05 less margin
+TARGET_MIN_R = 2.5        # keep them well away from the robot's start
+
+
 def target_pose(rng):
-    """A spot 1-2 m from the origin, lying on its side at a random heading."""
-    for _ in range(200):
-        bearing = rng.uniform(-math.pi, math.pi)
-        radius = rng.uniform(1.0, 2.0)
-        x = radius * math.cos(bearing)
-        y = radius * math.sin(bearing)
+    """A spot on the court, lying on its side at a random heading.
+
+    At least TARGET_MIN_R from the origin so the robot has to actually
+    navigate, and clear of the obstacles by OBST_CLEAR.
+    """
+    for _ in range(400):
+        x = rng.uniform(-TARGET_X_ABS, TARGET_X_ABS)
+        y = rng.uniform(-TARGET_Y_ABS, TARGET_Y_ABS)
+        if math.hypot(x, y) < TARGET_MIN_R:
+            continue
         if clear_of_obstacles(x, y):
             break
     else:
