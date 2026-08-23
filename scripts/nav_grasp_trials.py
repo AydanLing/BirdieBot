@@ -528,13 +528,33 @@ class NavGrasp(Node):
 # The last entry floats at z 0.30..0.60: invisible to the lidar plane at
 # z=0.07 and detectable only through the ZED depth layer added to the local
 # costmap. It is the one obstacle that exercises that layer.
+# Spread across the court, not ringed around the spawn.
+#
+# These sat within ~1.05 m of the origin, which was fine in husarion_world
+# where targets were 1-2 m away. On a 13.4 x 6.1 m court with targets at
+# 4-5 m they became a cage around the robot's start, and one pair formed a
+# trap. Measured over four batches, the target at (+3.28,-1.87) failed every
+# single time: the straight line to it at -29.7 deg ran through the overhang
+# box, which spans z 0.30..0.60 while the lidar sits at 0.234 and passes
+# underneath, so the costmap saw clear floor. The robot drove in and wedged
+# between two boxes with 8 mm and 20 mm of clearance and sat there for over a
+# minute. It never had a chance -- that corridor is 0.35 m wide and the robot
+# is 0.44 m. AMCL was not the problem; its error stayed under 0.35 m until
+# after the robot was already stuck.
+#
+# The replacement keeps the overhang, because a box the lidar cannot see is
+# exactly what the depth costmap source exists to catch, but gives it room:
+# every obstacle is now at least 1.87 m clear of the spawn and the narrowest
+# corridor anywhere is 1.08 m, well over the 0.44 m the robot needs. Positions
+# are spread over both halves and both sides rather than tuned to block the
+# seeded targets, which would only overfit one draw of the RNG.
 OBSTACLES = [
     # x,     y,     sx,   sy,   sz,   z_centre
-    (0.95,  0.30,  0.30, 0.30, 0.60, 0.30),
-    (-0.30, 1.00,  0.30, 0.30, 0.60, 0.30),
-    (-1.00, -0.45, 0.30, 0.30, 0.60, 0.30),
-    (0.35, -1.00,  0.30, 0.30, 0.60, 0.30),
-    (1.05, -0.55,  0.40, 0.60, 0.30, 0.45),   # overhang: lidar cannot see it
+    (2.10,  0.90,  0.30, 0.30, 0.60, 0.30),
+    (2.60, -1.50,  0.30, 0.30, 0.60, 0.30),
+    (-2.40, 1.70,  0.30, 0.30, 0.60, 0.30),
+    (-2.70, -1.30, 0.30, 0.30, 0.60, 0.30),
+    (3.50,  1.60,  0.40, 0.60, 0.30, 0.45),   # overhang: lidar cannot see it
 ]
 OBST_CLEAR = 0.85         # m, minimum target-to-obstacle spacing
 OBST_START_CLEAR = 0.75   # m, keep the robot's start pose clear
