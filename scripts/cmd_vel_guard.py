@@ -67,6 +67,7 @@ class CmdVelGuard(Node):
         self.buf = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(self.buf, self)
         self.points = None
+        self._self_hits = 0
         self._ang = self._cos = self._sin = None   # beam angle table, cached          # obstacle points in base_link
         self.last_scan = None
         self.pub = self.create_publisher(TwistStamped, "/cmd_vel", 10)
@@ -133,6 +134,24 @@ class CmdVelGuard(Node):
         px = self.points[:, 0]
         py = self.points[:, 1]
         r2 = ROBOT_RADIUS * ROBOT_RADIUS
+
+        # Drop returns that are already inside the footprint at t=0. Nothing can
+        # be a FUTURE collision if the robot is standing on it, so these are a
+        # sensing artifact, not an obstacle. They are real: scan_self_filter
+        # clears the chassis RECTANGLE, whose front face is 0.191 m out, while
+        # this test uses the 0.22 m circumscribed radius, so the sliver between
+        # the two survives filtering and lands inside the circle. The result was
+        # "collision in 0.10s, stopping" 89 times in one batch -- the first
+        # forward-simulation step colliding against the robot's own body -- and
+        # nav2 being commanded 0.188 m/s while the guard published a hard zero
+        # for the first several seconds of a run.
+        inside = (px * px + py * py) < r2
+        if inside.any():
+            px = px[~inside]
+            py = py[~inside]
+            self._self_hits += int(inside.sum())
+            if px.size == 0:
+                return None
         # (steps, N) squared distances; argmax on the any-hit mask gives the
         # earliest colliding step, matching the old loop's return-on-first-hit.
         d2 = (px[None, :] - xs[:, None]) ** 2 + (py[None, :] - ys[:, None]) ** 2

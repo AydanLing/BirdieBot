@@ -182,12 +182,21 @@ controller_server:
       vy_max: 0.5
       wz_max: 2.5
       iteration_count: 1
-      prune_distance: 1.7
+      # 3.0, raised from 1.7. The optimiser's horizon is time_steps x model_dt
+      # = 56 x 0.05 = 2.8 s, which at vx_max 0.8 covers 2.24 m. Pruning the path
+      # to 1.7 m meant it could never see far enough ahead to justify committing
+      # to full speed. Measured output sat at 0.157 m/s, 20% of the limit, with
+      # nav2 itself the throttle rather than the guard or the drivetrain --
+      # commanded, guard output and achieved velocity all agreed within 0.01 m/s.
+      prune_distance: 3.0
       transform_tolerance: 0.1
       temperature: 0.3
       gamma: 0.015
       motion_model: "DiffDrive"
-      visualize: true
+      # false: MPPI publishes its whole candidate trajectory bundle as marker
+      # arrays every cycle, and every run here is headless with nothing
+      # subscribed to them. Pure cost on the machine that is the bottleneck.
+      visualize: false
       regenerate_noises: true
       TrajectoryVisualizer:
         trajectory_step: 5
@@ -215,7 +224,11 @@ controller_server:
       PreferForwardCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 5.0
+        # 12.0, raised from 5.0 against PathAlignCritic's 14.0. With the old
+        # weight the robot reversed the whole way to goals behind it: a measured
+        # 5 m backwards at 0.103 m/s, against 0.157 m/s forwards over the same
+        # distance ahead. Turning round first is worth the couple of seconds.
+        cost_weight: 12.0
         threshold_to_consider: 0.5
       CostCritic:
         enabled: true
@@ -230,7 +243,12 @@ controller_server:
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 14.0
+        # 7.0, halved from 14.0. Keeping the robot pinned to the path this hard
+        # made every fast trajectory look bad, because a faster candidate sweeps
+        # wider of a curvy global path than a slow one. Measured: nav2 commanded
+        # 0.17 m/s while the drivetrain does 0.60 on command and the guard passes
+        # it through untouched, so the optimiser was the only throttle.
+        cost_weight: 7.0
         max_path_occupancy_ratio: 0.05
         trajectory_point_step: 4
         threshold_to_consider: 0.5
@@ -239,7 +257,10 @@ controller_server:
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 5.0
+        # 10.0, doubled. This is the critic that rewards progress ALONG the path
+        # rather than proximity to it, so it is the one that should dominate on
+        # the long open runs across the court.
+        cost_weight: 10.0
         offset_from_furthest: 5
         threshold_to_consider: 1.4
       PathAngleCritic:
