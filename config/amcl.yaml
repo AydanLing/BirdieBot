@@ -323,7 +323,18 @@ local_costmap:
           clearing: True
           marking: True
           min_obstacle_height: 0.10
-          max_obstacle_height: 1.00
+          # 0.70, not 1.00, because of the badminton net. The net panel spans
+          # z 0.760..1.524 across the whole court width at x=0, and the robot
+          # starts on that line. With a 1.00 ceiling its lower 24 cm sat inside
+          # this band, so the eye-in-hand depth camera painted a lethal barrier
+          # along x=0 whenever the arm happened to look that way. Measured over
+          # two batches with a fixed seed, every target at +x timed out (4/4)
+          # and every target at -x succeeded (6/6) with err ~0.245. The barrier
+          # is a phantom: the robot is 0.30 m tall and drives under the net
+          # without touching it. Anything above 0.70 cannot collide with the
+          # base, so marking it only invents obstacles. The clearing-only
+          # sources keep their 1.00 ceiling -- a higher ceiling clears more.
+          max_obstacle_height: 0.70
           obstacle_max_range: 2.5
           # Self-filter. The ZED is on link5 and the claw hangs in the lower
           # field of view: measured 9470 cloud points at 0.2-0.3 m from
@@ -426,7 +437,18 @@ global_costmap:
           clearing: True
           marking: True
           min_obstacle_height: 0.10
-          max_obstacle_height: 1.00
+          # 0.70, not 1.00, because of the badminton net. The net panel spans
+          # z 0.760..1.524 across the whole court width at x=0, and the robot
+          # starts on that line. With a 1.00 ceiling its lower 24 cm sat inside
+          # this band, so the eye-in-hand depth camera painted a lethal barrier
+          # along x=0 whenever the arm happened to look that way. Measured over
+          # two batches with a fixed seed, every target at +x timed out (4/4)
+          # and every target at -x succeeded (6/6) with err ~0.245. The barrier
+          # is a phantom: the robot is 0.30 m tall and drives under the net
+          # without touching it. Anything above 0.70 cannot collide with the
+          # base, so marking it only invents obstacles. The clearing-only
+          # sources keep their 1.00 ceiling -- a higher ceiling clears more.
+          max_obstacle_height: 0.70
           obstacle_max_range: 2.5
           obstacle_min_range: 0.55
           raytrace_max_range: 3.0
