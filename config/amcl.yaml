@@ -190,7 +190,27 @@ controller_server:
       # commanded, guard output and achieved velocity all agreed within 0.01 m/s.
       prune_distance: 3.0
       transform_tolerance: 0.1
-      temperature: 0.3
+      # 0.05, down from 0.3. This is the softmax selectivity: MPPI weights its
+      # 1000 sampled trajectories by exp(-cost/temperature) and averages them,
+      # so a high temperature averages good and mediocre samples together and
+      # the output is dragged toward the middle of the batch rather than toward
+      # the best of it. That is what was capping commanded speed at roughly a
+      # fifth of vx_max while the base itself does 0.601 m/s on a direct
+      # command and the guard passes it through untouched.
+      #
+      # Peak commanded vx, measured over 45 s runs the length of the court:
+      #   temperature 0.3   0.198, 0.190, 0.189 m/s
+      #   temperature 0.05  0.310, 0.304 m/s
+      # Two separate stacks, so about +60%.
+      #
+      # There is a floor: 0.01 and 0.10 both produced runs with no motion at
+      # all, though the stack was degrading by then and those are not clean
+      # measurements. 0.05 is the only value below 0.3 that has actually been
+      # seen to work, twice.
+      #
+      # Raising vx_std instead does the opposite -- 0.2 -> 0.5 dropped the mean
+      # from 0.170 to 0.135, because wider sampling widens the average too.
+      temperature: 0.05
       gamma: 0.015
       motion_model: "DiffDrive"
       # false: MPPI publishes its whole candidate trajectory bundle as marker

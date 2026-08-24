@@ -12,8 +12,8 @@ Two harnesses:
 | `scripts/nav_grasp_trials.py N` | N single-object trials; base teleports home between each |
 | `scripts/collect_trials.py N` | N court-clearing trials; corner start, 16 shuttles, no teleport home |
 
-Best measured results: **10/10** single-object at 3.84–6.02 m, mean 144 s per
-trial. **93%** (42/45) on the 16-shuttle collection task over three trials.
+Best measured results: **10/10** single-object at 3.84–6.02 m; mean trial time
+94 s after the MPPI `temperature` fix (144 s before it). **93%** (42/45) on the 16-shuttle collection task over three trials.
 
 ## Running it
 
@@ -92,11 +92,12 @@ core to serve a gamepad nobody was holding. Set it true for teleop.
 
 ## Known open issues
 
-- **MPPI commands ~0.175 m/s against a `vx_max` of 0.8.** The drivetrain does
-  0.601 m/s on a direct command and the guard passes it through untouched, so
-  nav2 itself is the throttle. The guard, the drivetrain, `prune_distance` and
-  the critic balance have all been ruled out; the actual cap is not yet found.
-  This is the largest available performance win.
+- **MPPI speed: largely solved, headroom remains.** The cap was `temperature`,
+  the softmax selectivity: at 0.3 the optimiser averaged good and mediocre
+  samples together and its output was dragged toward the middle of the batch.
+  0.05 raised peak commanded vx from ~0.19 to ~0.31 m/s and cut trial time 35%
+  (nav 68.3 -> 34.0 s). It still asks for well under `vx_max` 0.8 while the base
+  does 0.601 on a direct command, so there is more to find.
 - **Reach bias in collection runs.** Picks land at 0.023–0.166 m where the
   single-object harness gives 0.104–0.180, and failures cluster at the low end.
   Correlates with hop length.
