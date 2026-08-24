@@ -11,7 +11,10 @@
 # cause of every half-active stack this project has produced.
 #
 # Usage: bringup.sh [world] [map]      defaults: badminton_court
-set -eu
+# -e but deliberately NOT -u: /opt/ros/jazzy/setup.bash references
+# AMENT_TRACE_SETUP_FILES unset, so `set -u` kills the script on the first
+# source line. Found by running this script rather than by reading it.
+set -e
 
 WS=/home/aydan-ling/rosbot_ws
 WORLD=${1:-badminton_court}
