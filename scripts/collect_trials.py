@@ -380,7 +380,7 @@ def main():
                 else:
                     nav = node.send_nav_goal(gx, gy, approach)
                 node.fine_approach(gx, gy, approach)
-                vis_err, _vi, vis_seen = node.visual_servo()
+                vis_err, _vi, vis_seen = node.visual_servo(aim_map=(aim[0], aim[1]))
                 park_arm()
                 time.sleep(1)
             except PickTimeout:

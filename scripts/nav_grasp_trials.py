@@ -108,6 +108,17 @@ VISION_SETTLE = 2.0       # s to let the arm stop before believing a frame.
                           # (now 1.5 s) arm trajectory so a mid-swing image is
                           # still never paired with a settled TF.
 VISION_SAMPLES = 6        # synced frames per detection, median-combined
+
+# How far a blob may sit from where the target is predicted to be, in metres,
+# before it is treated as a different object. Only consulted when a caller
+# supplies that prediction, so the single-object path is unaffected.
+#
+# 0.45 is chosen against the two error scales either side of it: AMCL plus the
+# fine approach leave the target within roughly 0.2 m of prediction, while the
+# collection field spaces objects MIN_SEP = 0.90 m apart. Measured reaches in a
+# 16-shuttle run were 0.967 and 0.968 m -- the robot had driven to a neighbour,
+# and those sit far outside this gate while the honest errors sit well inside.
+VISION_GATE = 0.45
 MOVE_V = 0.22             # m/s during a relative correction
 MOVE_W = 1.0              # rad/s while turning to face the target
 MOVE_TIMEOUT = 20.0
@@ -203,8 +214,13 @@ class NavGrasp(Node):
             self.arm.publish(t)
             self.spin(0.05)
 
-    def _deproject(self, rgb_msg, dep_msg):
-        """One frame -> object position in base_link, or None.
+    def _deproject_all(self, rgb_msg, dep_msg):
+        """One frame -> every yellow blob as (x, y, area) in base_link.
+
+        Returns all of them, not just the biggest, because with a field of
+        objects the biggest blob in frame is frequently not the one the robot
+        was sent to. Callers that know where their target should be use that to
+        choose; the single-object path still just takes the largest.
 
         Mirrors grasp_ball's detector: largest yellow contour, whole-blob
         centroid, median depth across it, then deproject. rgb and depth are the
@@ -217,61 +233,99 @@ class NavGrasp(Node):
         mask = cv2.inRange(hsv, LOWER_YELLOW, UPPER_YELLOW)
         cont, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not cont:
-            return None
-        big = max(cont, key=cv2.contourArea)
-        if cv2.contourArea(big) < MIN_CONTOUR_AREA:
-            return None
-        blob = np.zeros(mask.shape, dtype=np.uint8)
-        cv2.drawContours(blob, [big], -1, 255, cv2.FILLED)
-        valid = (blob > 0) & np.isfinite(depth) & (depth > 0.0)
-        if not valid.any():
-            return None
-        ys, xs = np.nonzero(valid)
-        u, v = float(xs.mean()), float(ys.mean())
-        d = float(np.median(depth[valid]))
-        k = self.info.k
-        fx, fy, cx, cy = k[0], k[4], k[2], k[5]
-        ps = PointStamped()
-        ps.header = dep_msg.header
-        ps.point.x = d
-        ps.point.y = -(u - cx) / fx * d
-        ps.point.z = -(v - cy) / fy * d
+            return []
         try:
             tf = self.buf.lookup_transform(
                 "base_link", dep_msg.header.frame_id, rclpy.time.Time())
         except Exception:
-            return None
-        b = do_transform_point(ps, tf)
-        return b.point.x, b.point.y
+            return []
+        k = self.info.k
+        fx, fy, cx, cy = k[0], k[4], k[2], k[5]
+        out = []
+        for c in cont:
+            area = cv2.contourArea(c)
+            if area < MIN_CONTOUR_AREA:
+                continue
+            blob = np.zeros(mask.shape, dtype=np.uint8)
+            cv2.drawContours(blob, [c], -1, 255, cv2.FILLED)
+            valid = (blob > 0) & np.isfinite(depth) & (depth > 0.0)
+            if not valid.any():
+                continue
+            ys, xs = np.nonzero(valid)
+            u, v = float(xs.mean()), float(ys.mean())
+            d = float(np.median(depth[valid]))
+            ps = PointStamped()
+            ps.header = dep_msg.header
+            ps.point.x = d
+            ps.point.y = -(u - cx) / fx * d
+            ps.point.z = -(v - cy) / fy * d
+            b = do_transform_point(ps, tf)
+            out.append((b.point.x, b.point.y, area))
+        return out
 
-    def detect(self):
-        """Median object position in base_link over VISION_SAMPLES frames."""
+    def _deproject(self, rgb_msg, dep_msg):
+        """Largest blob only. Unchanged behaviour, for the single-object path."""
+        c = self._deproject_all(rgb_msg, dep_msg)
+        if not c:
+            return None
+        best = max(c, key=lambda t: t[2])
+        return best[0], best[1]
+
+    def detect(self, expect=None):
+        """Median object position in base_link over VISION_SAMPLES frames.
+
+        With expect set, each frame contributes the blob nearest that predicted
+        position rather than its largest blob, and frames whose nearest blob is
+        beyond VISION_GATE contribute nothing.
+        """
         self.frames = []
         self.collecting = True
         end = time.time() + 4.0
         while rclpy.ok() and len(self.frames) < VISION_SAMPLES and time.time() < end:
             rclpy.spin_once(self, timeout_sec=0.05)
         self.collecting = False
-        pts = [p for p in (self._deproject(r, d) for r, d in self.frames) if p]
+
+        if expect is None:
+            pts = [p for p in (self._deproject(r, d) for r, d in self.frames) if p]
+        else:
+            pts = []
+            for r, d in self.frames:
+                near = [c for c in self._deproject_all(r, d)
+                        if math.hypot(c[0] - expect[0], c[1] - expect[1]) <= VISION_GATE]
+                if near:
+                    c = min(near, key=lambda c: math.hypot(c[0] - expect[0],
+                                                           c[1] - expect[1]))
+                    pts.append((c[0], c[1]))
         if len(pts) < 2:
             return None
         return (float(np.median([p[0] for p in pts])),
                 float(np.median([p[1] for p in pts])))
 
-    def find_object(self):
+    def find_object(self, expect=None):
         """Sweep joint1 until the object is seen. Returns base_link (x, y).
 
         A single forward look is not enough: the failures this stage exists to
         fix left the target near 72 deg bearing, past the camera's half-FOV, so
         the sweep is what makes them recoverable at all.
         """
+        best = None
         for b in SEARCH_BEARINGS:
             self.set_arm(b)
             self.spin(VISION_SETTLE)
-            p = self.detect()
-            if p is not None:
+            p = self.detect(expect)
+            if p is None:
+                continue
+            if expect is None:
                 return p
-        return None
+            # With a prediction to compare against, keep sweeping and take the
+            # best match rather than the first sighting. Returning the first
+            # one is what let a neighbouring object at a different bearing win.
+            e = math.hypot(p[0] - expect[0], p[1] - expect[1])
+            if best is None or e < best[0]:
+                best = (e, p)
+            if e < 0.10:                      # close enough to stop looking
+                break
+        return best[1] if best else None
 
     def odom_pose(self):
         try:
@@ -355,15 +409,28 @@ class NavGrasp(Node):
         self.drive_forward(rng - ARM_X - STANDOFF_REACH)
         return True
 
-    def visual_servo(self):
+    def visual_servo(self, aim_map=None):
         """Put the object at (ARM_X + STANDOFF_REACH, 0) in base_link.
+
+        aim_map is the target's (x, y) in the map frame. Supply it when there is
+        more than one object about: it is converted to a base_link prediction
+        afresh on every iteration -- the base moves between them, so a
+        prediction computed once goes stale immediately -- and the detector then
+        picks the blob nearest that instead of the largest in frame.
 
         Returns (final_error_m, iterations, seen) for reporting.
         """
         seen = False
         err = float("nan")
         for i in range(VISION_ITERS):
-            p = self.find_object()
+            expect = None
+            if aim_map is not None:
+                bp = self.base_pose()
+                if bp is not None:
+                    dx, dy = aim_map[0] - bp[0], aim_map[1] - bp[1]
+                    c, s = math.cos(-bp[2]), math.sin(-bp[2])
+                    expect = (dx * c - dy * s, dx * s + dy * c)
+            p = self.find_object(expect)
             if p is None:
                 return err, i, seen
             seen = True
