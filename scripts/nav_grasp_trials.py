@@ -75,6 +75,12 @@ FINE_TIMEOUT = 40.0       # s
 # lands at 0.245..0.250 m almost every trial (its xy_goal_tolerance), so this is
 # a fixed ~0.25 m of driving per trial and the speed is pure overhead.
 FINE_V = 0.25             # m/s during fine approach
+
+# Heading error, in radians, that must be worked off before any forward motion.
+# Tighter than the old 0.15 rad gate because the turn now happens up front
+# rather than being trimmed away while driving: 0.09 rad over a 1 m approach is
+# under 10 cm of lateral miss, which the vision stage closes comfortably.
+FINE_TURN_FIRST = 0.09
 FINE_W = 1.0              # rad/s
 # The lift threshold and the PASS/FAIL/INDETERMINATE rules live in
 # repeatability_test.classify(), shared rather than duplicated here. A local
@@ -119,6 +125,12 @@ VISION_SAMPLES = 6        # synced frames per detection, median-combined
 # 16-shuttle run were 0.967 and 0.968 m -- the robot had driven to a neighbour,
 # and those sit far outside this gate while the honest errors sit well inside.
 VISION_GATE = 0.45
+
+# Match quality, in metres, that ends the bearing sweep immediately. Inside this
+# the sighting is treated as certainly the target; beyond it the sweep continues
+# looking for something better. Sits comfortably under VISION_GATE so a sighting
+# good enough to stop on is never one the gate would have been undecided about.
+VISION_ACCEPT = 0.25
 MOVE_V = 0.22             # m/s during a relative correction
 MOVE_W = 1.0              # rad/s while turning to face the target
 MOVE_TIMEOUT = 20.0
@@ -213,6 +225,31 @@ class NavGrasp(Node):
         for _ in range(15):
             self.arm.publish(t)
             self.spin(0.05)
+
+    def park_arm_async(self, secs=3):
+        """Send the arm home and return immediately. -> None.
+
+        repeatability_test.park_arm shells out to `ros2 topic pub` twenty times
+        and blocks for seconds while doing it, so calling it on arrival meant
+        the base sat still at the standoff waiting for an arm move that could
+        just as well have happened during the drive. This publishes the same
+        pose on the node's own publisher and returns, so the arm rehomes while
+        the base is on its way to the next object.
+
+        The gripper is deliberately not touched here: grasp_ball opens it as
+        part of its own sequence, and closing on the way would drop anything
+        still held. Callers that need a guaranteed arm pose before a pick
+        should still use the blocking version.
+        """
+        t = JointTrajectory()
+        t.joint_names = ["joint1", "joint2", "joint3", "joint4"]
+        pt = JointTrajectoryPoint()
+        pt.positions = [0.0, -1.0, 0.7, 0.3]      # same neutral pose as park_arm
+        pt.time_from_start.sec = secs
+        t.points = [pt]
+        for _ in range(5):
+            self.arm.publish(t)
+            self.spin(0.02)
 
     def _deproject_all(self, rgb_msg, dep_msg):
         """One frame -> every yellow blob as (x, y, area) in base_link.
@@ -317,13 +354,21 @@ class NavGrasp(Node):
                 continue
             if expect is None:
                 return p
-            # With a prediction to compare against, keep sweeping and take the
-            # best match rather than the first sighting. Returning the first
-            # one is what let a neighbouring object at a different bearing win.
+            # Take the first sighting that plausibly IS the target and stop.
+            #
+            # The sweep exists for the case where the object is off at a bearing
+            # the forward look cannot see, and every extra bearing costs a 2 s
+            # arm move plus a 2 s settle plus a frame grab. Sweeping all five
+            # every time to find a marginally better match was spending roughly
+            # 20 s per pick to refine a number the vision stage then iterates on
+            # anyway. Anything inside VISION_ACCEPT is already good enough to
+            # servo from; only a poor match is worth continuing to look for a
+            # better one, and the VISION_GATE filter has already discarded
+            # neighbouring objects by this point.
             e = math.hypot(p[0] - expect[0], p[1] - expect[1])
             if best is None or e < best[0]:
                 best = (e, p)
-            if e < 0.10:                      # close enough to stop looking
+            if e < VISION_ACCEPT:
                 break
         return best[1] if best else None
 
@@ -514,8 +559,8 @@ class NavGrasp(Node):
     def fine_approach(self, gx, gy, gyaw):
         """Drive the residual nav2 left behind, closing on the AMCL estimate.
 
-        Turns to face the goal, drives to it, then turns to the goal heading.
-        It does NOT strafe, even though the base is nominally holonomic.
+        Turns onto the bearing, then drives it. Never reverses, and does NOT
+        strafe even though the base is nominally holonomic.
 
         This used to command linear.y directly, on the reasoning that a mecanum
         base can correct x and y at once. Measured against ground truth with
@@ -557,18 +602,24 @@ class NavGrasp(Node):
             t.header.frame_id = "base_link"
 
             if dist >= FINE_TOL:
-                # Face the goal, then drive at it. If it is behind, back up
-                # rather than spinning 180 degrees for a few centimetres.
+                # Turn onto the bearing first, then drive it, and never reverse.
+                #
+                # This used to back up whenever the goal was more than 90 deg
+                # behind, on the reasoning that spinning 180 for a few
+                # centimetres is wasteful. On a collection sweep it is the wrong
+                # trade: the base reverses toward an object it cannot see, the
+                # camera rides on the arm and is pointed the other way, and
+                # reverse is capped at vx_min 0.35 against 0.8 forwards. The
+                # standoff is also chosen so the goal sits on the line from the
+                # base to the object, so once the turn is done the drive is
+                # straight at it and no closing rotation is needed.
                 heading_err = wrap(math.atan2(ey, ex) - byaw)
-                reverse = abs(heading_err) > math.pi / 2
-                if reverse:
-                    heading_err = wrap(heading_err + math.pi)
-                if abs(heading_err) > 0.15:
+                if abs(heading_err) > FINE_TURN_FIRST:
                     t.twist.angular.z = math.copysign(
                         min(FINE_W, max(0.15, abs(heading_err) * 1.5)), heading_err)
                 else:
                     v = min(FINE_V, max(0.04, dist * 0.8))
-                    t.twist.linear.x = -v if reverse else v
+                    t.twist.linear.x = v
                     t.twist.angular.z = heading_err * 1.0   # trim while driving
             else:
                 # In position; settle the final heading.

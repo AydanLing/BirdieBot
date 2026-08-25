@@ -77,6 +77,22 @@ START_CLEAR = 1.20
 
 SHUTTLE_Z = 0.033
 
+# Where to stop relative to the object, in metres, instead of the single-object
+# harness's STANDOFF of about 0.22.
+#
+# Parking almost on top of the object left nothing between "arrived" and "too
+# far", so any overshoot had to be reversed out of, and reversing is both slow
+# (vx_min 0.35 against vx_max 0.8) and blind, since the camera rides on the arm.
+# Stopping a metre short means an overshoot still lands short of the object and
+# the vision stage closes the gap driving forwards, which is the only direction
+# that sees where it is going.
+APPROACH_STANDOFF = 1.00
+
+# Aimed at slightly further out than APPROACH_STANDOFF so the expected overshoot
+# lands near it rather than past it. Undershooting costs a few cm of forward
+# driving; overshooting costs a reverse manoeuvre.
+APPROACH_UNDERSHOOT = 0.12
+
 # Hard ceiling on one pick, enforced with SIGALRM.
 #
 # Without it a single pick ran for 10968 s -- three hours on one shuttle, in a
@@ -367,9 +383,24 @@ def main():
             aim = skirt_centre(before)
             # Heading from the BASE to the object, not from the world origin.
             approach = math.atan2(aim[1] - pose[1], aim[0] - pose[0])
-            gx = aim[0] - STANDOFF * math.cos(approach)
-            gy = aim[1] - STANDOFF * math.sin(approach)
+            # Stand off along that same bearing, so the goal sits on the line
+            # from the base to the object: turning onto the bearing and driving
+            # straight then arrives facing the object, with no closing rotation
+            # and nothing to reverse out of.
+            # Clamped so the standoff point is never BEHIND the base. Picks are
+            # taken nearest-first, so the next object is frequently closer than
+            # the standoff already; without this the robot would drive away from
+            # it to reach a point a metre back, then turn round and come in
+            # again. When it is already inside the standoff the goal collapses
+            # onto the current position and the approach becomes a turn only,
+            # with the vision stage closing the rest going forwards.
+            d_obj = math.hypot(aim[0] - pose[0], aim[1] - pose[1])
+            back = min(APPROACH_STANDOFF + APPROACH_UNDERSHOOT, d_obj)
+            gx = aim[0] - back * math.cos(approach)
+            gy = aim[1] - back * math.sin(approach)
             hop = math.hypot(gx - pose[0], gy - pose[1])
+            # Rehome the arm now, not on arrival: it moves while the base does.
+            node.park_arm_async()
 
             t0 = time.time()
             signal.signal(signal.SIGALRM, _on_alarm)
