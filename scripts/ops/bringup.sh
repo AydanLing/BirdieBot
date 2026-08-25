@@ -51,10 +51,16 @@ setsid python3 "$WS/src/grab_sequence/scripts/cmd_vel_guard.py" \
 sleep 12
 
 say "3/5 localization"
+# autostart:=false on purpose. bond_timeout is read when a bond is CREATED,
+# which happens at activation, so with autostart the managers bond before
+# anything can change the parameter and a later set is accepted but inert.
 setsid ros2 launch nav2_bringup localization_launch.py \
-  use_sim_time:=true map:="$MAP" params_file:="$PARAMS" \
+  use_sim_time:=true map:="$MAP" params_file:="$PARAMS" autostart:=false \
   > "$LOGS/localization.log" 2>&1 < /dev/null &
-sleep 40
+sleep 35
+python3 "$HERE/arm_lifecycle.py" lifecycle_manager_localization map_server,amcl 25 \
+  || { say "localization would not start"; exit 1; }
+sleep 8
 
 say "4/5 seeding AMCL (must succeed before navigation)"
 if ! python3 "$HERE/seed_amcl.py" 0 0 0; then
@@ -64,20 +70,13 @@ fi
 
 say "5/5 navigation"
 setsid ros2 launch nav2_bringup navigation_launch.py \
-  use_sim_time:=true params_file:="$PARAMS" \
+  use_sim_time:=true params_file:="$PARAMS" autostart:=false \
   > "$LOGS/navigation.log" 2>&1 < /dev/null &
-sleep 50
+sleep 35
+python3 "$HERE/arm_lifecycle.py" lifecycle_manager_navigation controller_server,smoother_server,planner_server,behavior_server,bt_navigator,waypoint_follower,velocity_smoother 25 \
+  || say "WARNING: navigation did not start cleanly"
+sleep 8
 
-# nav2's launch files pass only {autostart} and {node_names} to the lifecycle
-# managers, so a lifecycle_manager_* block in amcl.yaml is read by nobody and
-# bond_timeout can only be set at runtime. Without it a manager eventually
-# misses a heartbeat under sustained load and declares a healthy server dead
-# ("CRITICAL FAILURE: SERVER map_server IS DOWN"), taking map->base_link with
-# it. Best effort: the CLI's own discovery is slow on a loaded machine.
-for mgr in lifecycle_manager_navigation lifecycle_manager_localization; do
-  timeout 45 ros2 param set "/$mgr" bond_timeout 0.0 > /dev/null 2>&1 \
-    || say "warning: could not set bond_timeout on $mgr"
-done
 
 say "logs in $LOGS -- load $(cut -d' ' -f1-2 /proc/loadavg)"
 say "done. Verify with: ros2 lifecycle get /controller_server"

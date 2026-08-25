@@ -37,7 +37,7 @@ produces a number worth reading. Missed ones are reported separately.
 import glob
 import math
 import os
-import subprocess
+import signal
 import re
 import sys
 import time
@@ -76,6 +76,27 @@ MIN_SEP = 0.90
 START_CLEAR = 1.20
 
 SHUTTLE_Z = 0.033
+
+# Hard ceiling on one pick, enforced with SIGALRM.
+#
+# Without it a single pick ran for 10968 s -- three hours on one shuttle, in a
+# run that managed seven picks in three and a half. Every individual call is
+# bounded (gz_run 20 s, run_grasp 300 s, fine_approach 40 s), so the hang was in
+# something that waits without a deadline, and a watchdog that bounds the whole
+# attempt catches that class of fault whichever member of it shows up. A pick
+# that has not finished in this long has failed regardless of what it is doing.
+#
+# SIGALRM rather than a timer thread because the stall is inside a blocking
+# call, and only a signal will break one of those from the same thread.
+PICK_DEADLINE = 420.0
+
+
+class PickTimeout(Exception):
+    pass
+
+
+def _on_alarm(signum, frame):
+    raise PickTimeout()
 
 # Below this, drive with fine_approach and never involve nav2.
 #
@@ -156,9 +177,22 @@ def sweep_orphan_shm():
     node stopped answering and map->base_link disappeared, with the processes
     still running but unable to talk to each other.
 
-    Only unmapped files are touched, and only between trials, never while a
-    grasp launch is in flight. Sweeping mid-trial on that failed run did not
-    recover it and may well have disturbed participants that were still live.
+    RETIRED -- do not call this. The /proc/*/maps test is not a liveness test.
+    A process can hold a shm file OPEN without it being mapped at the instant
+    the sweep looks, and FastDDS maps on demand, so "unmapped" reads as
+    "orphaned" for segments that are very much in use.
+
+    The damage was unmistakable once looked at directly: a freshly brought-up
+    stack seeded AMCL and localised fine, the harness started, swept 150
+    segments, and from that moment the gz->ROS bridges relayed nothing at all.
+    /clock went silent on the ROS side while Gazebo itself was still stepping
+    at RTF 0.57 and gz-side /scan still carried data. With no scans reaching
+    AMCL it never published map->base_link again, and every trial aborted at
+    the corner seed -- which is where three separate diagnoses went looking,
+    none of them here.
+
+    Kept only as the record of what not to do. If the segment leak needs
+    addressing, do it in teardown when nothing is running.
     """
     live = set()
     for m in glob.glob("/proc/[0-9]*/maps"):
@@ -202,6 +236,23 @@ def scatter(rng):
     return pts
 
 
+def lying_quat(rng):
+    """Quaternion for a shuttle lying on its side at a random heading.
+
+    Same construction as nav_grasp_trials.target_pose: half of -90 degrees
+    about X lays the cork-and-skirt axis into the ground plane, then a random
+    yaw spins it about vertical. Spawning without this leaves every shuttle
+    standing on its cork, which is both the easy case and the wrong one -- a
+    shuttle that has actually been hit lands on its side, and the whole
+    wrist-alignment path in grasp_ball exists to handle exactly that.
+    """
+    yaw = rng.uniform(-math.pi, math.pi)
+    h = math.pi / -4.0
+    qx_l, qw_l = math.sin(h), math.cos(h)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return (cy * qx_l, sy * qx_l, sy * qw_l, cy * qw_l)
+
+
 def nearest(pose, remaining):
     """Index of the closest un-collected shuttle to the base's current pose."""
     bx, by = pose[0], pose[1]
@@ -228,16 +279,12 @@ def main():
     # "CRITICAL FAILURE: SERVER map_server IS DOWN" -- after which AMCL stops
     # publishing map->base_link, every hop is computed from a stale pose, and
     # the picks fail with the object metres from where the robot thinks it is.
-    for mgr in ("lifecycle_manager_navigation", "lifecycle_manager_localization"):
-        try:
-            subprocess.run(["ros2", "param", "set", f"/{mgr}", "bond_timeout", "0.0"],
-                           capture_output=True, text=True, timeout=45)
-        except subprocess.TimeoutExpired:
-            # The CLI's own discovery is slow on a loaded machine and this is a
-            # best-effort hardening step, not a precondition. Letting the
-            # exception out killed a run before a single trial started.
-            print(f"  ! bond_timeout set on {mgr} timed out; continuing",
-                  flush=True)
+    # Nothing here touches bond_timeout. It is read when a bond is CREATED, at
+    # activation, so by the time a harness runs the managers have long since
+    # bonded and setting it is accepted but inert -- which is exactly why doing
+    # it here appeared to work and did not. scripts/ops/bringup.sh launches with
+    # autostart:=false and arms the managers before starting them, which is the
+    # only ordering that takes effect.
 
     dead = _inactive_nav2_nodes()
     if dead:
@@ -256,9 +303,10 @@ def main():
     totals = []
 
     for t in range(1, n_trials + 1):
-        swept = sweep_orphan_shm()
-        if swept:
-            print(f"  swept {swept} orphaned DDS segments", flush=True)
+        # NOT sweeping shm here any more. See sweep_orphan_shm's docstring: the
+        # /proc/*/maps test is not a safe liveness test and this was destroying
+        # segments still in use.
+        swept = 0
         for nm in names:
             remove_model(nm)
         # The single-object harness leaves a model called "shuttlecock" wherever
@@ -283,7 +331,12 @@ def main():
         field = scatter(rng)
         for nm, (x, y) in zip(names, field):
             spawn_model(nm, sdf, x, y, SHUTTLE_Z, settle=0.6)
-        time.sleep(4)
+            # Oriented after spawning rather than during: spawn_model takes a
+            # position only, and a shuttle left at the default orientation
+            # stands upright on its cork.
+            set_pose(nm, x, y, SHUTTLE_Z, *lying_quat(rng), settle=0.3)
+        # They slide a little before they settle, and there are sixteen of them.
+        time.sleep(8)
 
         remaining = {}
         for nm, (x, y) in zip(names, field):
@@ -319,14 +372,29 @@ def main():
             hop = math.hypot(gx - pose[0], gy - pose[1])
 
             t0 = time.time()
-            if hop < SHORT_HOP and segment_clear(pose[0], pose[1], gx, gy):
-                nav = "SKIPPED"
-            else:
-                nav = node.send_nav_goal(gx, gy, approach)
-            node.fine_approach(gx, gy, approach)
-            vis_err, _vi, vis_seen = node.visual_servo()
-            park_arm()
-            time.sleep(1)
+            signal.signal(signal.SIGALRM, _on_alarm)
+            signal.setitimer(signal.ITIMER_REAL, PICK_DEADLINE)
+            try:
+                if hop < SHORT_HOP and segment_clear(pose[0], pose[1], gx, gy):
+                    nav = "SKIPPED"
+                else:
+                    nav = node.send_nav_goal(gx, gy, approach)
+                node.fine_approach(gx, gy, approach)
+                vis_err, _vi, vis_seen = node.visual_servo()
+                park_arm()
+                time.sleep(1)
+            except PickTimeout:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                print(f"    {k:2d}/{len(field)} {nm} TIMEOUT       "
+                      f"hop {hop:4.2f}m  exceeded {PICK_DEADLINE:.0f}s, abandoning",
+                      flush=True)
+                node.stop()
+                remove_model(nm)
+                remaining.pop(nm)
+                indet += 1
+                continue
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
 
             base_truth = probe_pose("rosbot")
             reach = float("nan")
@@ -336,8 +404,20 @@ def main():
                 rx, ry = dx * c - dy * s, dx * s + dy * c
                 reach = math.hypot(rx - ARM_X, ry)
 
-            log, status = run_grasp(f"/tmp/collect_{t}_{k}.log")
-            after = probe_pose(nm)
+            signal.setitimer(signal.ITIMER_REAL, PICK_DEADLINE)
+            try:
+                log, status = run_grasp(f"/tmp/collect_{t}_{k}.log")
+                after = probe_pose(nm)
+            except PickTimeout:
+                print(f"    {k:2d}/{len(field)} {nm} TIMEOUT       "
+                      f"grasp phase exceeded {PICK_DEADLINE:.0f}s, abandoning",
+                      flush=True)
+                remove_model(nm)
+                remaining.pop(nm)
+                indet += 1
+                continue
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
             m = re.search(r"gripper (?:at|stalled at) ([-\d.]+)", log)
             verdict, why = classify(log, before, after,
                                     float(m.group(1)) if m else None, status)
