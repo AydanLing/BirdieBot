@@ -65,7 +65,16 @@ from repeatability_test import (ARM_X, UNKNOWN, WORLD, GzQueryFailed,  # noqa: E
 
 # Where the object should sit in base_link once parked: ARM_X + this. Matches
 # the radius band tipped_trials.py samples (0.148..0.157).
-STANDOFF_REACH = 0.152
+# 0.195, moved out from 0.152. The old value put the object at x 0.217 in
+# base_link, only 56 mm beyond the chassis front edge at 0.161, and the claw
+# reaches 70 mm to one side, so on descents where the wrist roll pointed a jaw
+# inboard it clipped the body: "Found a contact between 'body_link' and
+# 'gripper_right_link'" on descend z=0.020, in 2 of 5 trials. At 0.195 the
+# object sits at 0.260, a full 99 mm clear of the edge. The IK reaches x 0.300
+# at grasp height, so this is well inside the envelope despite the docstring's
+# 0.099..0.157 radius band, which describes a narrower case than the solver
+# actually covers.
+STANDOFF_REACH = 0.195
 STANDOFF = ARM_X + STANDOFF_REACH
 
 FINE_TOL = 0.030          # m, how close the fine approach drives the base

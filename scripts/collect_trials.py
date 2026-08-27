@@ -55,7 +55,9 @@ from repeatability_test import (UNKNOWN, GzQueryFailed,  # noqa: E402
                                 remove_model, resolved_shuttlecock_sdf,
                                 run_grasp, set_pose, skirt_centre, spawn_model)
 
-N_SHUTTLES = 16
+# Overridable so a quick validation run does not need a code edit; the field
+# geometry (spacing, bounds, clearances) is unchanged by the count.
+N_SHUTTLES = int(os.environ.get("COLLECT_N", "16"))
 
 # Bottom left corner of the court. The court is 13.4 x 6.1 centred on the
 # origin, so its corner is (-6.70, -3.05); this sits inside that with room for
