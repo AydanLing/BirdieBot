@@ -17,8 +17,20 @@ def generate_launch_description():
         )
         .to_moveit_configs()
     )
+    # manipulation_pro.yaml, NOT manipulation.yaml. The simulation is brought up
+    # with configuration:=manipulation_pro, and pointing MoveIt at the plain
+    # config gives it a different robot: the lidar in its old rear-deck spot at
+    # (-0.125, 0, 0.07) and no ZED on link5 at all.
+    #
+    # The cost of that divergence was days of it. Every deposit into the hopper
+    # failed with "Found a contact between 'rplidar_link' and
+    # 'gripper_left_link'", the lidar was moved four times to get away from it,
+    # and none of it helped, because the obstacle was a phantom in MoveIt's
+    # model sitting where the hopper now is. Proof: parking the real lidar a
+    # metre in the air left the sim reporting it at z +1.133 while the planner
+    # went on colliding with it.
     components_config = PathJoinSubstitution(
-        [FindPackageShare("rosbot_description"), "config", "rosbot_xl", "manipulation.yaml"]
+        [FindPackageShare("rosbot_description"), "config", "rosbot_xl", "manipulation_pro.yaml"]
     )
     robot_description_content = Command(
         [
