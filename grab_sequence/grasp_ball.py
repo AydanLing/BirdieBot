@@ -102,6 +102,58 @@ UPRIGHT_TOP_Z = 0.075
 # the arm sits at the chassis front so the working zone is ahead of the robot.
 ARM_X = 0.065
 SHOULDER_H = 0.2095     # joint2 height
+ARM_CHAIN = 0.254       # shoulder -> wrist, sets the reach envelope
+RELEASE_CLEAR = 0.010   # m above the hopper rim to open the jaws
+
+# Tool axis against the horizontal at the moment of release, and the height to
+# do it from.
+#
+# 0 lays the tool flat, which stands the shuttlecock upright, because the jaws
+# cradle it ACROSS the tool axis. At the pi/2 used for grasping it stays
+# parallel to the floor and lands across the mouth instead of dropping through
+# it. Probed over the mouth at x -0.117, pitch 0 has a solution only at z 0.25,
+# so the release height is set by the IK rather than chosen.
+DEPOSIT_PITCH = math.radians(45)   # same as the traverse: no second rotation
+DEPOSIT_Z = 0.34
+
+# Wrist roll at the release.
+#
+# pi, and applied AFTER the traverse. This is the pairing that carried 2/2 with
+# the 126 mm hopper. It was later changed to 0 and moved ahead of the tilt on
+# the reasoning that orienting early is safer, and the deposits that followed
+# lost the object every time. Two variables moved at once there, so which of
+# them mattered is not established; this restores both to the known-good state
+# rather than guessing.
+DEPOSIT_ROLL = math.pi - 0.05
+
+# Heights and tool pitches for carrying the object to the hopper.
+#
+# The carry used to be one move_to_point from the grasp pose straight to the
+# release pose, translating 340 mm backwards, climbing 170 mm and rotating the
+# tool from pi/2 to 0 all at once. The claw took a diagonal swipe across the
+# chassis and knocked the shuttlecock out of the jaws, which is what the
+# deposits were failing on: the arm arrived at the mouth within 3 mm, logged a
+# clean release, and the object was already on the floor behind the robot.
+#
+# So: rise, rise again, traverse, present. Nothing moves laterally until the
+# claw is clear of the deck.
+#
+# The tool pitch during the traverse is what sets the ceiling, and it is worth
+# being exact because two earlier guesses at it were wrong. Tool-down tops out
+# at z 0.215 over the hopper, capping the rim at 82 mm above the 0.133 deck.
+# Flat, it reaches 0.460 at both the grasp and the hopper radius. Probed at 5 mm
+# steps out to 0.495; an earlier probe stopping at 0.38 was reporting its own
+# range rather than the arm's, and a hopper got shrunk on the strength of it.
+#
+# Flat also means the traverse and the release share an attitude, so nothing has
+# to rotate once the object is over the mouth, and the shuttlecock rides upright
+# the whole way rather than being tipped partway.
+#
+# The traverse passes OVER the rim, so the rim stays below TRANSIT_Z.
+CLEAR_Z = 0.20          # straight up, tool still down, just to clear the deck
+TRANSIT_PITCH = math.radians(45)
+TRANSIT_Z = 0.34        # cruise height, above a 0.313 rim
+RELEASE_SETTLE = 1.0    # s to let it fall clear before the arm moves on
 V1 = (0.024, 0.128)     # joint2 -> joint3, in the arm plane
 L2 = math.hypot(*V1)
 PSI1 = math.atan2(V1[0], V1[1])
@@ -186,9 +238,20 @@ def grasp_point_of(joints, tool_offset=GRASP_OFFSET):
     return ARM_X + gs * math.cos(j1), gs * math.sin(j1), gh
 
 
-def arm_joints_for(x, y, z, tool_offset=GRASP_OFFSET):
-    """Closed-form 4-DOF solution putting the grasp point at base_link (x, y, z)
-    with the gripper perpendicular to the floor. None if unreachable.
+def arm_joints_for(x, y, z, tool_offset=GRASP_OFFSET, pitch=math.pi / 2):
+    """Closed-form 4-DOF solution putting the grasp point at base_link (x, y, z).
+    None if unreachable.
+
+    pitch is the tool axis against the horizontal: pi/2 points it straight down,
+    which is what grasping off the floor needs and what every caller used to get
+    implicitly. It matters because the jaws cradle the shuttlecock ACROSS the
+    tool axis, so a vertical tool holds the object horizontal. Depositing into a
+    tube wants the opposite, and pitch=0 stands it upright.
+
+    The tool offset is applied along the tool axis rather than straight down.
+    That is a fix, not a refinement: the old form added it to z unconditionally,
+    which is only correct at pi/2 and silently mislocates the pads at any other
+    pitch. At pi/2 this expression reduces to the old one exactly.
 
     Solved analytically rather than as a MoveIt pose goal: with only 4 joints a
     full 6-DOF pose goal is over-constrained, and OMPL's goal sampler just fails
@@ -196,7 +259,8 @@ def arm_joints_for(x, y, z, tool_offset=GRASP_OFFSET):
     j1 = math.atan2(y, x - ARM_X)
     s = math.hypot(x - ARM_X, y)
     for elbow in (+1, -1):
-        sol = ik_planar(s, z + tool_offset, math.pi / 2, elbow)
+        sol = ik_planar(s - tool_offset * math.cos(pitch),
+                        z + tool_offset * math.sin(pitch), pitch, elbow)
         if sol is None:
             continue
         joints = (j1,) + sol
@@ -502,6 +566,44 @@ class BallGrasper(Node):
         if q is not None:
             self.get_logger().info(f"gripper at {q:.4f} (target {position:.4f})")
 
+    def lidar_xy(self, timeout=2.0):
+        """Lidar position in base_link, or None. Read from TF, not hardcoded.
+
+        The lidar has moved twice in this project -- rear deck, then a mast
+        above the hopper, then forward of the arm -- so a constant here would
+        be wrong again within the week. base_link -> rplidar_link is static, so
+        one lookup is enough.
+        """
+        end = time.time() + timeout
+        while rclpy.ok() and time.time() < end:
+            try:
+                t = self.tf_buffer.lookup_transform(
+                    "base_link", "rplidar_link", rclpy.time.Time())
+                return t.transform.translation.x, t.transform.translation.y
+            except Exception:
+                rclpy.spin_once(self, timeout_sec=0.1)
+        return None
+
+    def hopper_opening(self, timeout=2.0):
+        """Centre of the hopper mouth in base_link, or None. -> (x, y, z).
+
+        From TF, like lidar_xy, for the same reason. The two offsets below are
+        properties of the mesh rather than of the robot: the solid's footprint
+        centre sits (8.8, 32.8) mm from its own origin, and the mouth is at the
+        top of a 300 mm body scaled to 0.72.
+        """
+        end = time.time() + timeout
+        while rclpy.ok() and time.time() < end:
+            try:
+                t = self.tf_buffer.lookup_transform(
+                    "base_link", "hopper_link", rclpy.time.Time())
+            except Exception:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                continue
+            o = t.transform.translation
+            return o.x + 0.0088, o.y + 0.0328, o.z + 0.300 * 0.60
+        return None
+
     def set_wrist_roll(self, angle, seconds=3.0):
         """Rotate the jaws about the tool axis. joint5 is simulation-only and
         has its own controller, so it is commanded directly like the gripper."""
@@ -635,7 +737,7 @@ def main():
     def set_gripper(state):
         node.set_gripper(GRIPPER_OPEN if state == "Open" else GRIPPER_CLOSE)
 
-    def move_to_point(x, y, z, label, tries=3, tol=0.004):
+    def move_to_point(x, y, z, label, tries=3, tol=0.004, pitch=math.pi / 2):
         """Put the finger pads at base_link (x, y, z), correcting for the arm's
         steady-state error.
 
@@ -645,7 +747,7 @@ def main():
         actually ended up, and re-aim by the leftover error."""
         goal = [x, y, z]
         for attempt in range(tries):
-            joints = arm_joints_for(*goal)
+            joints = arm_joints_for(*goal, pitch=pitch)
             if joints is None:
                 node.get_logger().error(f"No IK for adjusted goal during {label}")
                 return False
@@ -845,6 +947,12 @@ def main():
         # it is round from above and every roll is equivalent.
         if target_axis is not None:
             j1 = math.atan2(by, bx - ARM_X)
+            # The 180 deg flip stays. It puts the narrow cork end at +z, which
+            # is where the V's gap narrows, and that is what makes the grip
+            # hold. Dropping it to try and get the cork pointing down at the
+            # hopper was a mistake: the deposit attitude is set by the tool
+            # PITCH at release, not by the grasp roll, and removing the flip
+            # only made the grasp itself take hold at the wrong angle.
             roll = -j1 - target_axis - math.pi
             roll = math.atan2(math.sin(roll), math.cos(roll))
             lo, hi = -math.pi, math.pi
@@ -860,7 +968,72 @@ def main():
         if not vertical_move(bz + HOVER, bz, "descend"):
             return
         set_gripper("Close")
+
+        # The wrist is deliberately NOT re-rolled between the grasp and the
+        # release. It used to be, to dodge a lidar that turned out to be a
+        # phantom in a stale planning model, and every roll about the tool axis
+        # is another chance for the shuttlecock to work loose. The tool is held
+        # perpendicular to the ground by arm_joints_for throughout, so the
+        # object keeps the attitude it was grasped in all the way to the hopper.
         vertical_move(bz, bz + HOVER, "lift")
+
+        # Carry it to the hopper and let go.
+        #
+        # The binding constraint is vertical and it is the IK, not the arm's raw
+        # link lengths. arm_joints_for holds the tool perpendicular to the floor,
+        # and under that constraint nothing above z 0.21 over the mouth has a
+        # solution. So the hopper is scaled down until its rim plus
+        # RELEASE_CLEAR fits under that, and the check below asks the IK itself
+        # rather than computing an envelope. An earlier version compared
+        # hypot(radius, height) against the 0.254 m shoulder-to-wrist chain,
+        # which is the envelope for the WRIST, said the mouth was reachable when
+        # it was not, and cost five failed trials.
+        mouth = node.hopper_opening()
+        if mouth is None:
+            node.get_logger().warn("no base_link->hopper_link; not depositing")
+        else:
+            hx, hy, hz = mouth
+            # Height comes from what pitch 0 can actually reach, not from the
+            # rim plus a clearance; the shuttlecock hangs below the jaws and
+            # falls the rest of the way in.
+            rel_z = max(DEPOSIT_Z, hz + RELEASE_CLEAR)
+            if arm_joints_for(hx, hy, rel_z, pitch=DEPOSIT_PITCH) is None:
+                node.get_logger().error(
+                    f"no IK over the hopper mouth at ({hx:.3f}, {hy:.3f}, "
+                    f"{rel_z:.3f}); not depositing")
+            else:
+                # 1. straight up at the grasp XY until the claw is clear of the
+                #    chassis. Nothing lateral happens until this is done.
+                if not move_to_point(bx, by, CLEAR_Z, "rise clear", tol=0.020):
+                    node.get_logger().error("could not rise clear of the chassis")
+                    return
+                # 2. keep going up at the same XY, now flat, to get above the
+                #    rim. Still no lateral motion, so nothing sweeps the deck.
+                if not move_to_point(bx, by, TRANSIT_Z, "rise to cruise",
+                                     pitch=TRANSIT_PITCH, tol=0.020):
+                    node.get_logger().error("could not reach cruise height")
+                    return
+                # 3. across at constant height, above the hopper rim.
+                if not move_to_point(hx, hy, TRANSIT_Z, "traverse",
+                                     pitch=TRANSIT_PITCH, tol=0.020):
+                    node.get_logger().error("could not traverse to the hopper")
+                    return
+                # 4. roll to the release attitude, then let go. The pitch is
+                #    unchanged from the traverse, so the object is not rotated
+                #    a second time at the mouth.
+                node.set_wrist_roll(DEPOSIT_ROLL)
+                # tol 0.02, not the 0.004 used for grasping. move_to_point
+                # re-aims until it is inside tolerance, and asking for 4 mm over
+                # a 100 mm opening meant it kept re-aiming after it had already
+                # arrived: four of five deposits reached the mouth at 4.1 to
+                # 7.9 mm and then died with "No IK for adjusted goal during over
+                # hopper" chasing a precision the task does not need.
+                if move_to_point(hx, hy, rel_z, "over hopper",
+                                 pitch=DEPOSIT_PITCH, tol=0.020):
+                    set_gripper("Open")
+                    time.sleep(RELEASE_SETTLE)
+                    node.get_logger().info("Deposited into hopper")
+
         node.get_logger().info("Grasp sequence complete")
     finally:
         # MoveItPy holds C++ state tied to the rclpy context; shut down once here
