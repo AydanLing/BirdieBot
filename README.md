@@ -1,4 +1,4 @@
-# grab_sequence
+# Birdie Bot
 
 Navigate-then-grasp for a Husarion ROSbot XL with an OpenMANIPULATOR-X arm and
 an eye-in-hand ZED camera, in Gazebo Harmonic under ROS 2 Jazzy. The robot
