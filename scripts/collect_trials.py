@@ -77,6 +77,24 @@ MIN_SEP = 0.90
 # object already under the arm and the navigation phase is untested.
 START_CLEAR = 1.20
 
+# The net spans the full court width at x = 0, and shuttlecocks are kept on the
+# robot's side of it.
+#
+# This is not a convenience. The net panel sits at z 0.760..1.524, above the
+# lidar at 0.234 and above the 0.30 m robot, so the robot can physically drive
+# underneath it; but the costmap's depth source marks anything in its height
+# band, and the whole court width at x = 0 is the worst possible place for a
+# phantom barrier to appear. Sending the robot across the net also doubles the
+# longest hop, and long hops are where nav2 is weakest here.
+#
+# A real collecting robot works its own half anyway.
+NET_X = 0.0
+NET_CLEAR = 0.80          # m of standoff from the net line
+
+# Which half the robot is on, taken from its own start rather than hardcoded, so
+# moving START_X to the far end moves the field with it.
+SIDE = -1.0 if START_X < NET_X else 1.0
+
 SHUTTLE_Z = 0.033
 
 # Where to stop relative to the object, in metres, instead of the single-object
@@ -240,7 +258,10 @@ def scatter(rng):
     for _ in range(20000):
         if len(pts) == N_SHUTTLES:
             break
-        x = rng.uniform(-FIELD_X, FIELD_X)
+        # Bounded to the robot's half: from the far baseline in to the net
+        # standoff. sorted() because SIDE flips which end is the lower bound.
+        lo, hi = sorted((SIDE * FIELD_X, NET_X + SIDE * NET_CLEAR))
+        x = rng.uniform(lo, hi)
         y = rng.uniform(-FIELD_Y, FIELD_Y)
         if math.hypot(x - START_X, y - START_Y) < START_CLEAR:
             continue

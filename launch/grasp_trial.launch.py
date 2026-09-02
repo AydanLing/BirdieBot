@@ -1,4 +1,17 @@
-"""Bring the whole stack up on the badminton court and run grasp trials.
+"""Bring the whole stack up on the badminton court and clear one half of it.
+
+Four shuttlecocks are scattered over the robot's own half, and the robot starts
+on that half, in the corner. It works through them nearest-first, picking each
+up and depositing it in the onboard hopper, without ever being teleported back
+between picks, so error accumulates across the run the way it would on a real
+court.
+
+Everything stays one side of the net on purpose. The net panel sits at
+z 0.760..1.524, so the robot can physically drive under it, but the depth
+costmap marks anything in its height band and the net spans the whole court
+width at x = 0 -- the worst possible place for a phantom barrier. Crossing also
+doubles the longest hop, and long hops are where nav2 is weakest here. A real
+collecting robot works its own half anyway.
 
 Replaces scripts/ops/bringup.sh, which did the same thing but reached into the
 source tree by absolute path and could only be run from a shell in this
@@ -29,7 +42,8 @@ loudly, which is the real check.
 
 Usage:
     ros2 launch grab_sequence grasp_trial.launch.py
-    ros2 launch grab_sequence grasp_trial.launch.py headless:=False trials:=3
+    ros2 launch grab_sequence grasp_trial.launch.py headless:=False
+    ros2 launch grab_sequence grasp_trial.launch.py shuttles:=8 trials:=2
     ros2 launch grab_sequence grasp_trial.launch.py run_trial:=false
 """
 
@@ -63,6 +77,7 @@ def generate_launch_description():
     world = LaunchConfiguration("world")
     headless = LaunchConfiguration("headless")
     trials = LaunchConfiguration("trials")
+    shuttles = LaunchConfiguration("shuttles")
     run_trial = LaunchConfiguration("run_trial")
 
     worlds_share = FindPackageShare("husarion_gz_worlds")
@@ -127,22 +142,35 @@ def generate_launch_description():
         package="grab_sequence", executable="arm_lifecycle.py",
         name="arm_navigation", output="screen",
         arguments=["lifecycle_manager_navigation", NAV_NODES, "25"])
+    # collect_trials rather than nav_grasp_trials: this scenario has a FIELD of
+    # shuttlecocks present at once and the robot is not put back between picks,
+    # which is the collection harness's job. nav_grasp_trials places one object
+    # per trial and teleports home each time.
+    #
+    # The count goes through the environment because that is what collect_trials
+    # reads; the field geometry, spacing and net standoff are unaffected by it.
     trial = Node(
-        package="grab_sequence", executable="nav_grasp_trials.py",
-        name="nav_grasp_trials", output="screen",
+        package="grab_sequence", executable="collect_trials.py",
+        name="collect_trials", output="screen",
+        additional_env={"COLLECT_N": shuttles, "GZ_WORLD": world},
         arguments=[trials], condition=IfCondition(run_trial))
 
     return LaunchDescription([
         DeclareLaunchArgument("world", default_value="badminton_court",
                               description="Gazebo world and AMCL map basename."),
         DeclareLaunchArgument(
-            "headless", default_value="True",
+            "headless", default_value="False",
             description=("Run Gazebo without its GUI. True by default: this "
                          "machine is 8-core and has crashed outright at load "
                          "33.7, and a full stack plus a trial batch already "
                          "sits at 20-38 without one.")),
-        DeclareLaunchArgument("trials", default_value="5",
-                              description="Number of navigate-then-grasp trials."),
+        DeclareLaunchArgument(
+            "trials", default_value="1",
+            description="How many times to clear the field."),
+        DeclareLaunchArgument(
+            "shuttles", default_value="4",
+            description=("Shuttlecocks per trial, all on the robot's half of "
+                         "the net.")),
         DeclareLaunchArgument("run_trial", default_value="true",
                               description="Set false to bring the stack up and stop."),
 
