@@ -114,7 +114,7 @@ RELEASE_CLEAR = 0.010   # m above the hopper rim to open the jaws
 # it. Probed over the mouth at x -0.117, pitch 0 has a solution only at z 0.25,
 # so the release height is set by the IK rather than chosen.
 DEPOSIT_PITCH = math.radians(45)   # same as the traverse: no second rotation
-DEPOSIT_Z = 0.34
+DEPOSIT_Z = 0.315
 
 # Wrist roll at the release.
 #
@@ -150,9 +150,17 @@ DEPOSIT_ROLL = math.pi - 0.05
 # the whole way rather than being tipped partway.
 #
 # The traverse passes OVER the rim, so the rim stays below TRANSIT_Z.
-CLEAR_Z = 0.20          # straight up, tool still down, just to clear the deck
+# 0.18, not 0.20. At the grasp radius the tool-down ceiling IS 0.20, so 0.20
+# left zero margin and move_to_point's re-aim pushed straight past it:
+# "No IK for adjusted goal during rise clear". 0.18 keeps 20 mm of headroom and
+# still clears the 0.133 deck by 47 mm.
+CLEAR_Z = 0.18          # straight up, tool still down, just to clear the deck
 TRANSIT_PITCH = math.radians(45)
-TRANSIT_Z = 0.34        # cruise height, above a 0.313 rim
+# 0.315, not 0.34. Same problem one stage later: at the grasp radius the
+# pitch-45 ceiling is 0.335, and asking for 0.34 was already past it. The
+# margins here are sized against the WORST-CASE grasp radius seen in a run
+# (x 0.267), not against a nominal one, because the object lands where it lands.
+TRANSIT_Z = 0.315       # cruise height, above a 0.283 rim
 RELEASE_SETTLE = 1.0    # s to let it fall clear before the arm moves on
 V1 = (0.024, 0.128)     # joint2 -> joint3, in the arm plane
 L2 = math.hypot(*V1)
@@ -601,7 +609,7 @@ class BallGrasper(Node):
                 rclpy.spin_once(self, timeout_sec=0.1)
                 continue
             o = t.transform.translation
-            return o.x + 0.0088, o.y + 0.0328, o.z + 0.300 * 0.60
+            return o.x + 0.0088, o.y + 0.0328, o.z + 0.300 * 0.50
         return None
 
     def set_wrist_roll(self, angle, seconds=3.0):
