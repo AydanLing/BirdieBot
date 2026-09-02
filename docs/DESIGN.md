@@ -137,6 +137,18 @@ points where matters for both gripping and dropping.
 
 ## 2. Shape of the system
 
+![ROS 2 data flow](media/ros_graph.png)
+
+Generated from the running system by `scripts/dev/graph_dump.py`. `/clock`,
+`/tf` and the lifecycle `/bond` topics are hidden, because they connect nearly
+every node to every other and bury the structure: in the unfiltered graph
+(`media/ros_graph_full.png`) **89% of the edges are `/parameter_events` and
+`/rosout`**, which every ROS 2 node subscribes to automatically, and only 2.6%
+is actual data flow.
+
+Two nodes in that picture are this project's; eighteen are stock nav2 and the
+rest are Gazebo bridges, ros2_control, MoveIt and rviz.
+
 ```
 Gazebo  ──bridge──>  /scan ─> scan_self_filter ─> /scan_filtered ─┬─> AMCL ─> map->odom
                                                                   └─> costmaps
