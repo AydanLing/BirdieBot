@@ -45,10 +45,19 @@ def kill_existing(mgr):
     return n
 
 
+def _argv():
+    """sys.argv without ROS's own arguments.
+
+    launch_ros appends "--ros-args ..." to every node it starts, so positional
+    parsing has to stop there or it reads a flag as a value.
+    """
+    a = sys.argv
+    return a[:a.index("--ros-args")] if "--ros-args" in a else a
+
 def main():
-    mgr = sys.argv[1]
-    nodes = sys.argv[2].split(",")
-    timeout = float(sys.argv[3]) if len(sys.argv) > 3 else 25.0
+    mgr = _argv()[1]
+    nodes = _argv()[2].split(",")
+    timeout = float(_argv()[3]) if len(_argv()) > 3 else 25.0
 
     killed = kill_existing(mgr)
     print(f"arm_lifecycle: replaced {killed} stock {mgr}")

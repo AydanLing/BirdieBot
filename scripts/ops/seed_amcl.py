@@ -31,10 +31,19 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
 
+def _argv():
+    """sys.argv without ROS's own arguments.
+
+    launch_ros appends "--ros-args ..." to every node it starts, so positional
+    parsing has to stop there or it reads a flag as a value.
+    """
+    a = sys.argv
+    return a[:a.index("--ros-args")] if "--ros-args" in a else a
+
 def main():
-    x = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
-    y = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0
-    yaw = math.radians(float(sys.argv[3])) if len(sys.argv) > 3 else 0.0
+    x = float(_argv()[1]) if len(_argv()) > 1 else 0.0
+    y = float(_argv()[2]) if len(_argv()) > 2 else 0.0
+    yaw = math.radians(float(_argv()[3])) if len(_argv()) > 3 else 0.0
 
     rclpy.init()
     n = Node("amcl_seeder")

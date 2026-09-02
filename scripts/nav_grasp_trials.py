@@ -1057,10 +1057,19 @@ def _wait_for_transform(target, source, timeout=20.0):
     return ok
 
 
+def _argv():
+    """sys.argv without ROS's own arguments.
+
+    launch_ros appends "--ros-args ..." to every node it starts, so positional
+    parsing has to stop there or it reads a flag as a value.
+    """
+    a = sys.argv
+    return a[:a.index("--ros-args")] if "--ros-args" in a else a
+
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    n = int(_argv()[1]) if len(_argv()) > 1 else 10
     import random
-    rng = random.Random(int(sys.argv[2]) if len(sys.argv) > 2 else 11)
+    rng = random.Random(int(_argv()[2]) if len(_argv()) > 2 else 11)
 
     rclpy.init()
     node = NavGrasp()
@@ -1307,10 +1316,15 @@ def main():
         print("  obstacle contact:  NOT CHECKED -- "
               f"{contacts.reason}")
     else:
+        # samples, not stream_bytes/topics. Those belonged to the
+        # contact-sensor version of ClearanceMonitor, replaced by the
+        # pose-based one when contact sensors turned out never to
+        # instantiate on runtime-spawned models. The summary kept
+        # referencing them, so every otherwise-successful run ended in
+        # AttributeError after printing its results and exited non-zero.
         print(f"  obstacle contact:  {len(contact_trials)} trial(s) touched an "
               f"obstacle{': ' + str(contact_trials) if contact_trials else ''}  "
-              f"[{contacts.stream_bytes} bytes streamed from "
-              f"{len(contacts.topics)} sensor(s)]")
+              f"[{contacts.samples} clearance samples]")
     node.destroy_node()
     rclpy.try_shutdown()
 
