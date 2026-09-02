@@ -16,9 +16,11 @@
 # source line. Found by running this script rather than by reading it.
 set -e
 
-WS=/home/aydan-ling/rosbot_ws
-WORLD=${1:-badminton_court}
+# Workspace root, derived from this script's own location rather than hardcoded.
+# scripts/ops/bringup.sh -> up three to the package, up two more to the workspace.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS="${ROSBOT_WS:-$(cd "$HERE/../../../.." && pwd)}"
+WORLD=${1:-badminton_court}
 MAP=${2:-$WS/install/husarion_gz_worlds/share/husarion_gz_worlds/maps/$WORLD.yaml}
 PARAMS=$WS/src/grab_sequence/config/amcl.yaml
 LOGS=${BRINGUP_LOGS:-/tmp/rosbot_bringup}

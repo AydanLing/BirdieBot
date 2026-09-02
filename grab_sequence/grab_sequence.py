@@ -7,7 +7,7 @@ def main():
 
     rclpy.init() # starts up ROS2 - has to run before anything else ROS-related works
 
-    moveit = MoveItPy(node_name= "grab_sequence_node") # creates a MoveIt2 interface object and names it "grab_sequence_node" (this will show up in ros2 node list) 
+    moveit = MoveItPy(node_name= "grab_sequence_node") # creates a MoveIt2 interface object and names it "grab_sequence_node" (this will show up in ros2 node list)
     time.sleep(10.0)
     arm = moveit.get_planning_component("manipulator") # grabs reference to the "manipulator" planning group
     gripper = moveit.get_planning_component("gripper") # grabs reference to the "gripper" planning group
@@ -38,7 +38,7 @@ def main():
         else:
             print("Planning failed", flush=True) # if no valid plan (unreachable, collision, etc) print a message
 
-    def set_gripper(named_state): # takes a predefined named joint configuration from SRDF (either "open" or "closed") 
+    def set_gripper(named_state): # takes a predefined named joint configuration from SRDF (either "open" or "closed")
         gripper.set_start_state_to_current_state() # sets the starting state to be the current state
         gripper.set_goal_state(configuration_name = named_state) # perform the gripper action
         plan_result = gripper.plan() # tells MoveIt to run its planning pipeline
@@ -54,12 +54,12 @@ def main():
     move_arm_to_pose(x=0.040, y=-0.00, z=0.336)
 
 
-    rclpy.shutdown() 
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
 
-    
+
 
 
 

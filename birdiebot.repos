@@ -1,0 +1,25 @@
+# vcs import < birdiebot.repos
+#
+# Branches matter. The forks carry changes this package depends on:
+#   rosbot_ros                       hopper, lidar placement, SRDF collision pairs,
+#                                    gripper force, use_servo gate
+#   husarion_gz_worlds               the badminton court world and its AMCL map
+#   husarion_components_description  ZED at 640x360, a resolution whose depth cloud
+#                                    survives delivery well enough to be a costmap source
+repositories:
+  BirdieBot:
+    type: git
+    url: https://github.com/AydanLing/BirdieBot.git
+    version: main
+  rosbot_ros:
+    type: git
+    url: https://github.com/AydanLing/rosbot_ros.git
+    version: sim-wrist-roll-tapered-jaws
+  husarion_gz_worlds:
+    type: git
+    url: https://github.com/AydanLing/husarion_gz_worlds.git
+    version: badminton-court
+  husarion_components_description:
+    type: git
+    url: https://github.com/AydanLing/husarion_components_description.git
+    version: zed-640x360-for-costmap

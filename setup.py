@@ -52,10 +52,10 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='aydan-ling',
-    maintainer_email='aydan-ling@todo.todo',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    maintainer='Aydan Ling',
+    maintainer_email='aydan.ling11@gmail.com',
+    description='Autonomous shuttlecock collection on a simulated badminton court.',
+    license='Apache-2.0',
     extras_require={
         'test': [
             'pytest',

@@ -3,9 +3,9 @@
 <package format="3">
   <name>grab_sequence</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="aydan-ling@todo.todo">aydan-ling</maintainer>
-  <license>TODO: License declaration</license>
+  <description>Autonomous shuttlecock collection on a simulated badminton court: a ROSbot XL with an OpenMANIPULATOR-X arm navigates to shuttlecocks, aligns on an eye-in-hand depth camera, picks them up and deposits them in an onboard hopper.</description>
+  <maintainer email="aydan.ling11@gmail.com">Aydan Ling</maintainer>
+  <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>

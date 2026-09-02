@@ -8,7 +8,7 @@ import numpy as np # used to define the HSV color range as an array
 class BallDetector(Node): # new node class that inherits from Node
     def __init__(self):
         super().__init__('ball_detector') # registers this node under the name 'ball detector'
-        self.bridge = CvBridge() 
+        self.bridge = CvBridge()
         self.subscription = self.create_subscription( Image, '/zed/zed_node/rgb/image_rect_color', self.image_callback, 10) # subscribes to the camera topic
 
     def image_callback(self, msg): # this function runs automatically each ti,e a new 'Image' message is published on the subscribed topic
