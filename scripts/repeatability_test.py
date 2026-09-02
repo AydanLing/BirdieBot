@@ -19,6 +19,7 @@ Run:  python3 repeatability_test.py [n_trials]
 """
 
 import math
+import importlib.util
 import os
 import random
 import re
@@ -59,8 +60,22 @@ def _arm_x():
     front, and every trial then placed the target behind the robot where it
     cannot be reached -- scoring the robot down for a harness bug.
     """
-    src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "..", "grab_sequence", "grasp_ball.py")
+    # Located through the package rather than by walking up from __file__.
+    # The relative path assumed the source layout, where this file sits in
+    # scripts/ next to grab_sequence/. Once the scripts were installed so the
+    # launch file could reach them, they landed in lib/grab_sequence/ and
+    # "../grab_sequence/grasp_ball.py" resolved to nothing:
+    #
+    #   FileNotFoundError: .../lib/grab_sequence/../grab_sequence/grasp_ball.py
+    #
+    # find_spec gives the installed module's path WITHOUT importing it, which
+    # matters because importing grasp_ball drags in MoveIt and rclpy to read a
+    # single float. The source-tree path stays as a fallback so this still works
+    # when run straight out of scripts/.
+    spec = importlib.util.find_spec("grab_sequence.grasp_ball")
+    src = spec.origin if spec and spec.origin else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "grab_sequence", "grasp_ball.py")
     with open(src) as fh:
         m = re.search(r"^ARM_X\s*=\s*([-\d.]+)", fh.read(), re.M)
     if not m:
@@ -442,8 +457,19 @@ def resolved_shuttlecock_sdf(tmp="/tmp/shuttlecock_resolved.sdf"):
     fail loudly; it reports success and gives you a scene that is missing the
     thing you are measuring.
     """
-    here = os.path.dirname(os.path.abspath(__file__))
-    model_dir = os.path.abspath(os.path.join(here, "..", "models", "shuttlecock"))
+    # The installed share directory first, the source tree as a fallback.
+    # "../models" from __file__ only works when this runs from scripts/; an
+    # installed copy sits in lib/grab_sequence and finds nothing there.
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        model_dir = os.path.join(
+            get_package_share_directory("grab_sequence"), "models", "shuttlecock")
+    except Exception:
+        model_dir = ""
+    if not os.path.isdir(model_dir):
+        here = os.path.dirname(os.path.abspath(__file__))
+        model_dir = os.path.abspath(
+            os.path.join(here, "..", "models", "shuttlecock"))
     src = os.path.join(model_dir, "model.sdf")
     if not os.path.isfile(src):
         raise WorldMismatch(f"shuttlecock model.sdf missing at {src}")

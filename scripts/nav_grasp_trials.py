@@ -33,6 +33,7 @@ Run:  python3 nav_grasp_trials.py [n_trials] [seed]
 
 import atexit
 import math
+import importlib.util
 import os
 import re
 import signal
@@ -152,8 +153,15 @@ def _const(name, cast=float):
     a duplicate silently went stale once and every trial then scored the robot
     down for a harness bug. Same risk applies to the detection thresholds.
     """
-    src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "..", "grab_sequence", "grasp_ball.py")
+    # Same package-relative lookup as repeatability_test._arm_x, and for the
+    # same reason: walking up from __file__ assumes the source layout, and once
+    # these scripts were installed to lib/grab_sequence the relative path
+    # resolved to nothing. find_spec finds the installed module without
+    # importing it.
+    spec = importlib.util.find_spec("grab_sequence.grasp_ball")
+    src = spec.origin if spec and spec.origin else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "grab_sequence", "grasp_ball.py")
     with open(src) as fh:
         body = fh.read()
     m = re.search(rf"^{name}\s*=\s*(.+)$", body, re.M)
