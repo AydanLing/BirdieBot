@@ -1,8 +1,6 @@
-
+# Birdie Bot
 
 https://github.com/user-attachments/assets/33159f59-d129-48f2-8405-3e28f053adb7
-
-# Birdie Bot
 
 A ROSbot XL with an OpenMANIPULATOR-X arm clears a badminton court of
 shuttlecocks. It drives to each one, aligns on an eye-in-hand depth camera,
