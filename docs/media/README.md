@@ -1,6 +1,7 @@
 # Demo media
 
-`demo.gif` is what the README shows. It is not in the repo yet.
+The README shows a screen recording uploaded as a GitHub asset, linked at
+the top of it. Re-record with the recipe below and replace that link.
 
 ## Recording it
 

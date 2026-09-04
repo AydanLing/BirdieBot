@@ -9,9 +9,6 @@ goes looking for the next. It is not told where any of them are.
 
 ROS 2 Jazzy, Gazebo Harmonic, nav2, MoveIt 2.
 
-<!-- Replace with a recording: see docs/media/README.md -->
-![Birdie Bot clearing one half of the court](docs/media/demo.gif)
-
 ```bash
 ros2 launch grab_sequence grasp_trial.launch.py
 ```
