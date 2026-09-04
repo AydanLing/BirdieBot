@@ -58,6 +58,43 @@ a position measured on the move is worth about half a metre and the same object
 measured stopped is worth about forty millimetres, every target is re-measured
 from a standstill before the robot commits to driving at it.
 
+## Stack
+
+**ROS 2 Jazzy** · Gazebo Harmonic (DART physics) · Fast DDS · `ros2_control` · TF2 ·
+nav2 · MoveIt 2 · OpenCV
+
+**Navigation** — AMCL for global localisation (particle filter, likelihood-field
+sensor model, omnidirectional motion model), an EKF fusing wheel odometry and IMU
+at 25 Hz, MPPI as the local controller, NavFn for global planning, and layered
+costmaps whose voxel layer is fed from the depth camera — it is the only thing
+that sees the overhanging obstacle the lidar plane passes under.
+
+**Manipulation** — MoveIt 2 driven from Python through MoveItPy, planning with
+OMPL/RRTConnect, FCL collision checking against the planning scene, and
+time-optimal trajectory parameterisation. The pick itself does not use the KDL
+solver: the arm has 4 DOF, so a general 6-DOF pose has no solution, and a
+closed-form planar IK is both faster and predictable about which of the two
+elbow branches it returns.
+
+**Perception** — HSV thresholding and contour extraction, pinhole deprojection
+against the camera intrinsics, PCA for the object's long axis plus a
+width-asymmetry test to work out which end is the cork, median and circular-mean
+filtering for noise, and approximate time synchronisation to pair colour frames
+with depth. The autonomous search adds radius clustering with hit-count
+confirmation, and resolves every detection at its capture-time transform so
+sightings taken while moving still accumulate in a fixed frame.
+
+**Simulated hardware** — Husarion ROSbot XL on mecanum wheels, a ROBOTIS
+OpenMANIPULATOR-X with 4 DOF plus an added wrist roll and a parallel gripper, a
+Stereolabs ZED depth camera mounted eye-in-hand at 640×360 and 110° field of
+view with 30 mm depth noise, an RPLIDAR, an IMU, and a custom hopper. Nothing
+here runs on a physical robot; the real-hardware interfaces are present in the
+description but never loaded.
+
+**Python** — `rclpy`, NumPy, OpenCV, `cv_bridge`, `message_filters`, `tf2_ros`.
+Tested with pytest, and linted with flake8 and pydocstyle through `ament`.
+
+
 ## Reading the code
 
 **[`docs/DESIGN.md`](docs/DESIGN.md)** is the substance of this repo: why each
