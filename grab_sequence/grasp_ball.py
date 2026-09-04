@@ -42,17 +42,15 @@ from sensor_msgs.msg import CameraInfo, Image, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from tf2_geometry_msgs import do_transform_point
 
-BASE_FRAME = "base_link"
-RGB_TOPIC = "/zed/zed_node/rgb/image_rect_color"
-DEPTH_TOPIC = "/zed/zed_node/depth"
-CAMERA_INFO_TOPIC = "/zed/zed_node/rgb/camera_info"
+from .detect_params import (BASE_FRAME, CAMERA_INFO_TOPIC,  # noqa: F401
+                            deproject, DEPTH_TOPIC, LOWER_YELLOW,
+                            MIN_CONTOUR_AREA, MIN_DETECT_RANGE,
+                            MIN_VALID_PX, RGB_TOPIC, UPPER_YELLOW)
 
-LOWER_YELLOW = np.array([20, 100, 100])
-UPPER_YELLOW = np.array([35, 255, 255])
-# Pixel area, so it scales with the square of camera resolution. The ZED
-# dropped from 1280x720 to 640x360 (see stereolabs_zed.urdf.xacro) to make
-# the depth cloud usable as a nav2 costmap source, so this went 80 -> 20.
-MIN_CONTOUR_AREA = 20.0
+# Vision constants live in detect_params so the drive-by scanner and the dev
+# viewer can read them without importing this module, which would drag MoveItPy
+# into processes that have no business loading a motion planner. Re-exported
+# under their original names because callers and tooling already refer to them.
 
 # --- target object: to-scale badminton shuttlecock ----------------------
 # Cork base 26 mm dia (z 0..0.025), feather skirt 65 mm dia (z 0.025..0.085).
@@ -218,8 +216,11 @@ HOVER = 0.06
 
 
 def ik_planar(s, h, pitch_sum, elbow):
-    """Place the link5 origin at (s, h) in the arm plane. pitch_sum fixes the
-    tool direction: pi/2 means pointing straight down at the floor."""
+    """Place the link5 origin at (s, h) in the arm plane.
+
+    pitch_sum fixes the tool direction: pi/2 means pointing straight down
+    at the floor.
+    """
     ds, dh = s, h - SHOULDER_H
     dist = math.hypot(ds, dh)
     if dist > L2 + L3 or dist < abs(L2 - L3):
@@ -233,8 +234,11 @@ def ik_planar(s, h, pitch_sum, elbow):
 
 
 def grasp_point_of(joints, tool_offset=GRASP_OFFSET):
-    """Forward kinematics: where the middle of the finger pads actually is,
-    in base_link, for a given (j1, j2, j3, j4)."""
+    """Forward kinematics for the middle of the finger pads.
+
+    Returns where the pads actually are in base_link, for a given
+    (j1, j2, j3, j4).
+    """
     j1, t2, t3, t4 = joints
     a = PSI1 + t2
     p3s, p3h = L2 * math.sin(a), SHOULDER_H + L2 * math.cos(a)
@@ -248,6 +252,7 @@ def grasp_point_of(joints, tool_offset=GRASP_OFFSET):
 
 def arm_joints_for(x, y, z, tool_offset=GRASP_OFFSET, pitch=math.pi / 2):
     """Closed-form 4-DOF solution putting the grasp point at base_link (x, y, z).
+
     None if unreachable.
 
     pitch is the tool axis against the horizontal: pi/2 points it straight down,
@@ -263,7 +268,8 @@ def arm_joints_for(x, y, z, tool_offset=GRASP_OFFSET, pitch=math.pi / 2):
 
     Solved analytically rather than as a MoveIt pose goal: with only 4 joints a
     full 6-DOF pose goal is over-constrained, and OMPL's goal sampler just fails
-    with "Unable to sample any valid states for goal tree"."""
+    with "Unable to sample any valid states for goal tree".
+    """
     j1 = math.atan2(y, x - ARM_X)
     s = math.hypot(x - ARM_X, y)
     for elbow in (+1, -1):
@@ -352,11 +358,17 @@ class BallGrasper(Node):
         blob = np.zeros(mask.shape, dtype=np.uint8)
         cv2.drawContours(blob, [largest], -1, 255, cv2.FILLED)
         valid = (blob > 0) & np.isfinite(depth_img) & (depth_img > 0.0)
-        if int(valid.sum()) < 50:
+        if int(valid.sum()) < MIN_VALID_PX:
             return
         ys, xs = np.nonzero(valid)
         u, v = float(xs.mean()), float(ys.mean())
         d = float(np.median(depth_img[valid]))
+        # A blob this close is not a target on the floor -- it is the object
+        # already in the jaws, roughly 100 mm from the lens and by far the
+        # largest yellow thing in frame. Grasping "it" would drive the arm into
+        # the robot's own gripper.
+        if d < MIN_DETECT_RANGE:
+            return
 
         # Long axis of the silhouette, for aligning the wrist roll. Taken from
         # the whole blob rather than just the top face, since a shuttlecock
@@ -502,23 +514,13 @@ class BallGrasper(Node):
 
     def _to_base(self, u, v, d, header, tf, ray_offset=0.0):
         """Deproject a pixel at depth d and express it in base_link."""
-        fx, fy = self.camera_info.k[0], self.camera_info.k[4]
-        cx, cy = self.camera_info.k[2], self.camera_info.k[5]
-
-        # rgb/depth carry frame_id "zed_camera_center", the physical link
-        # (REP-103: X forward, Y left, Z up), not an optical frame.
-        x_cam = d
-        y_cam = -(u - cx) / fx * d
-        z_cam = -(v - cy) / fy * d
-
-        r = math.sqrt(x_cam**2 + y_cam**2 + z_cam**2)
-        if r < 1e-6:
+        cam = deproject(self.camera_info.k, u, v, d, ray_offset)
+        if cam is None:
             return None
-        k = (r + ray_offset) / r
 
         point = PointStamped()
         point.header = header
-        point.point.x, point.point.y, point.point.z = x_cam * k, y_cam * k, z_cam * k
+        point.point.x, point.point.y, point.point.z = cam
         p = do_transform_point(point, tf)
         return (p.point.x, p.point.y, p.point.z)
 
@@ -530,7 +532,8 @@ class BallGrasper(Node):
         then refuses to plan at all ("Start state out of bounds"), so the close
         fails exactly when contact means it matters most. Publishing directly
         is also what joy2servo does in this repo. gripper_right_joint mimics
-        the left, so only the left is commanded."""
+        the left, so only the left is commanded.
+        """
         msg = JointTrajectory()
         msg.joint_names = ["gripper_left_joint"]
         pt = JointTrajectoryPoint()
@@ -613,8 +616,11 @@ class BallGrasper(Node):
         return None
 
     def set_wrist_roll(self, angle, seconds=3.0):
-        """Rotate the jaws about the tool axis. joint5 is simulation-only and
-        has its own controller, so it is commanded directly like the gripper."""
+        """Rotate the jaws about the tool axis.
+
+        joint5 is simulation-only and has its own controller, so it is
+        commanded directly like the gripper.
+        """
         msg = JointTrajectory()
         msg.joint_names = ["joint5"]
         pt = JointTrajectoryPoint()
@@ -632,8 +638,11 @@ class BallGrasper(Node):
                 return
 
     def settle(self, seconds):
-        """Spin (rather than sleep) so queued frames from while the arm was
-        moving are drained instead of piling up for the next detection."""
+        """Spin rather than sleep, so queued frames are drained.
+
+        Frames captured while the arm was moving are drained instead of
+        piling up for the next detection.
+        """
         end = time.monotonic() + seconds
         while rclpy.ok() and time.monotonic() < end:
             rclpy.spin_once(self, timeout_sec=0.05)
@@ -642,7 +651,8 @@ class BallGrasper(Node):
         """Average several detections into one (x, y, z) in base_link.
 
         The deadline is wall-clock: under use_sim_time this node's ROS clock
-        reads 0 until its first spin, so a ROS-time deadline looks pre-expired."""
+        reads 0 until its first spin, so a ROS-time deadline looks pre-expired.
+        """
         self.samples.clear()
         self.collect_start = self.get_clock().now()
         self.collecting = True
@@ -746,13 +756,15 @@ def main():
         node.set_gripper(GRIPPER_OPEN if state == "Open" else GRIPPER_CLOSE)
 
     def move_to_point(x, y, z, label, tries=3, tol=0.004, pitch=math.pi / 2):
-        """Put the finger pads at base_link (x, y, z), correcting for the arm's
+        """Put the finger pads at base_link (x, y, z), correcting for the arm's.
+
         steady-state error.
 
         joint2 carries the whole arm and settles ~0.2 rad short of its command
         under gravity, which lands the gripper ~30 mm high -- enough to clip the
         shuttlecock instead of closing around it. So aim, measure where the pads
-        actually ended up, and re-aim by the leftover error."""
+        actually ended up, and re-aim by the leftover error.
+        """
         goal = [x, y, z]
         for attempt in range(tries):
             joints = arm_joints_for(*goal, pitch=pitch)

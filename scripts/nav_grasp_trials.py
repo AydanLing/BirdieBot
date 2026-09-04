@@ -58,11 +58,11 @@ from tf2_geometry_msgs import do_transform_point
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from repeatability_test import (ARM_X, UNKNOWN, WORLD, GzQueryFailed,  # noqa: E402
-                                WorldMismatch, classify, ensure_shuttlecock,
-                                gz_run, model_list, park_arm, probe_pose,
-                                remove_model, run_grasp, set_pose, skirt_centre,
-                                spawn_model, summarise)
+from repeatability_test import (ARM_X, classify, ensure_shuttlecock,  # noqa: E402,I202
+                                GzQueryFailed, model_list, park_arm,
+                                probe_pose, remove_model, run_grasp, set_pose,
+                                skirt_centre, spawn_model, summarise, UNKNOWN,
+                                WORLD, WorldMismatch)
 
 # Where the object should sit in base_link once parked: ARM_X + this. Matches
 # the radius band tipped_trials.py samples (0.148..0.157).
@@ -151,7 +151,13 @@ def _const(name, cast=float):
 
     repeatability_test._arm_x already does this for ARM_X, for the reason that
     a duplicate silently went stale once and every trial then scored the robot
-    down for a harness bug. Same risk applies to the detection thresholds.
+    down for a harness bug.
+
+    Only SEARCH_J234 still comes through here. The detection thresholds moved
+    to grab_sequence.detect_params, which has no heavy imports and can simply
+    be imported -- scraping source text was only ever a way around grasp_ball
+    pulling in MoveItPy, and it failed exactly as you would expect when the
+    constants were moved: RuntimeError at import, in three separate scripts.
     """
     # Same package-relative lookup as repeatability_test._arm_x, and for the
     # same reason: walking up from __file__ assumes the source layout, and once
@@ -170,21 +176,15 @@ def _const(name, cast=float):
     return cast(m.group(1).strip())
 
 
-def _hsv(name):
-    m = re.search(r"\[([^\]]+)\]", _const(name, str))
-    return np.array([int(v) for v in m.group(1).split(",")])
-
-
-LOWER_YELLOW = _hsv("LOWER_YELLOW")
-UPPER_YELLOW = _hsv("UPPER_YELLOW")
-MIN_CONTOUR_AREA = _const("MIN_CONTOUR_AREA")
 SEARCH_J234 = tuple(float(v) for v in
                     re.search(r"\(([^)]+)\)", _const("SEARCH_J234", str)).group(1).split(","))
 SEARCH_BEARINGS = [math.radians(d) for d in (0.0, 35.0, -35.0, 70.0, -70.0)]
 
-RGB_TOPIC = "/zed/zed_node/rgb/image_rect_color"
-DEPTH_TOPIC = "/zed/zed_node/depth"
-CAMERA_INFO_TOPIC = "/zed/zed_node/rgb/camera_info"
+
+from grab_sequence.detect_params import (CAMERA_INFO_TOPIC,  # noqa: E402
+                                         DEPTH_TOPIC, LOWER_YELLOW,
+                                         MIN_CONTOUR_AREA, RGB_TOPIC,
+                                         UPPER_YELLOW)
 
 
 def wrap(a):
@@ -1050,7 +1050,9 @@ def _wait_for_transform(target, source, timeout=20.0):
     """True once target<-source resolves. Its own node, so it is independent."""
     probe = Node("nav_grasp_tf_probe")
     buf = tf2_ros.Buffer()
-    listener = tf2_ros.TransformListener(buf, probe)
+    # Bound to a name deliberately: a TransformListener that is not referenced
+    # is garbage-collected and the buffer then silently never fills.
+    listener = tf2_ros.TransformListener(buf, probe)  # noqa: F841
     end = time.time() + timeout
     ok = False
     while rclpy.ok() and time.time() < end:
@@ -1073,6 +1075,7 @@ def _argv():
     """
     a = sys.argv
     return a[:a.index("--ros-args")] if "--ros-args" in a else a
+
 
 def main():
     n = int(_argv()[1]) if len(_argv()) > 1 else 10
@@ -1311,7 +1314,7 @@ def main():
         vis = (f"{vis_err:.3f}m x{vis_iters}" if vis_seen else "NOT SEEN")
         after_z = f"{after[2]:.3f}" if isinstance(after, tuple) else "  ?  "
         print(f"  trial {i:2d}: {verdict:13s} "
-              f"target ({tx:+.2f},{ty:+.2f}) d={math.hypot(tx,ty):.2f}m  "
+              f"target ({tx:+.2f}, {ty:+.2f}) d={math.hypot(tx, ty):.2f}m  "
               f"nav {nav:<9s} err {nav_err:.3f}  "
               f"fine {fine_d:.3f}m  vis {vis:<12s} "
               f"reach {reach:.3f}m  parked {clear:+.3f}m  closest {closest:<12s} "

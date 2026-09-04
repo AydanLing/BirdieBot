@@ -495,7 +495,230 @@ case.
 
 ---
 
-## 7. `scripts/cmd_vel_guard.py` — last-resort collision guard
+## 7. Autonomous search — finding the shuttlecocks without being told
+
+Everything up to here assumes the robot is handed a target. `collect_trials.py`
+reads every object's true position out of the simulator and drives to it, which
+answers "how good is the pick?" but quietly skips the harder half of the job.
+This section is the other half: the robot is told nothing, and has to build its
+own list of where things are.
+
+Four files, in dependency order: `detect_params.py` (what counts as a
+detection), `shuttle_scanner.py` (turning frames into world coordinates),
+`target_map.py` (turning coordinates into a list of distinct objects), and
+`scripts/search_trials.py` (the loop that uses it).
+
+### Why the pick's detector cannot simply be left running
+
+The obvious implementation is to leave `BallGrasper._image_cb` running while
+the robot drives. It does not work, and the reasons are worth stating because
+each one is a deliberate choice made correctly for the pick and wrongly for
+search.
+
+**It reads the latest transform, not the capture-time one.** The comment in
+`_image_cb` explains why: requesting TF at the image's own timestamp blocks
+inside a single-threaded executor, and the thread that is blocked is the same
+one that would have to spin to receive the TF that unblocks it. Deadlock. With
+the arm parked and the base still, latest and capture-time are the same
+transform, so the shortcut costs nothing. Driving, the cost is velocity times
+image age. Measured on this stack, image age is 12 ms median but 334 ms worst
+case — at 0.285 m/s that is a 95 mm error on a bad frame, and mid-rotation at
+1 rad/s it is 19° of bearing, which throws a 3 m target by most of a metre.
+
+**It averages in `base_link`.** `locate_ball` takes the median of ten samples
+to beat down the simulated ZED's 30 mm depth noise against roughly 10 mm of jaw
+clearance. That works only because `base_link` is not moving: ten samples are
+ten looks at one point. Driving, the frame's origin moves between samples, so
+they are ten looks at ten different points and the median is of a smear.
+
+**It keeps only the largest contour.** One object per frame, by construction.
+The frames worth having while crossing a scattered court are exactly the ones
+with several shuttlecocks in view.
+
+The fix for the first is in `shuttle_scanner`, for the second in `target_map`,
+and for the third is one loop.
+
+### `detect_params.py` — two tiers, because two jobs
+
+Split out of `grasp_ball.py` for a mechanical reason: `grasp_ball` imports
+`MoveItPy` at module level, so anything that wanted to read five thresholds had
+to load a motion planner first. Three scripts had grown regex scrapers that
+read the constants out of `grasp_ball.py`'s **source text** to dodge that
+import, and all three broke the moment the constants moved. `detect_params`
+has no heavy imports and can just be imported.
+
+The substance is the two tiers. The same yellow blob feeds two jobs with wildly
+different precision needs, and using one threshold for both is what limited
+detection to arm's length:
+
+| range | blob area | valid depth px |
+|---|---|---|
+| 1.24 m | 72.5 px² | 88 |
+| 1.98 m | 31.0 px² | 44 |
+| 2.99 m | 10.5 px² | 17 |
+| 3.02 m | 11.0 px² | 18 |
+| 3.99 m | 4.0 px² | 10 |
+
+Measured on the 640×360 simulated ZED (fx = 224) against shuttlecocks on the
+court floor, camera at the parked-arm height of 0.449 m.
+
+The binding constraint was never `MIN_CONTOUR_AREA`. It was the **50 valid
+depth pixel floor**, which exists so the median depth across a blob is worth
+millimetres. That is exactly right before closing jaws with 10 mm of clearance,
+and absurdly strict for deciding whether it is worth driving somewhere. Search
+tier drops to 8 px² and 10 valid pixels, which takes the sensing radius from
+about 1.5 m to about 3 m.
+
+Not lower. At 4 m a shuttlecock is 4 px² with 10 valid depth samples, which is
+indistinguishable from noise, and past that it stops producing a blob at all —
+that is optics, not tuning, and no relaxation recovers it. **The map is
+therefore always a local picture**, which is why a survey grid exists at all.
+
+### `shuttle_scanner.py` — capture-time TF without the deadlock
+
+The deadlock is avoided by never waiting. Each qualifying blob is deprojected
+immediately into the camera's own frame, then queued with its header. Draining
+the queue attempts a **non-blocking** lookup at the image's own timestamp; a
+detection whose transform has not arrived yet is put back and retried on the
+next frame. TF trails the image stream by milliseconds, so in practice
+everything resolves on the first or second attempt and the callback never
+blocks for any of it. Measured over 233 frames: 932 blobs filed, **zero** ever
+went stale.
+
+This costs nothing structurally — no `MultiThreadedExecutor`, no callback
+groups, no change to how any existing node is spun. That matters because the
+scanner is composed onto `NavGrasp`, a node that already works.
+
+Every detection is transformed into `map` before it is stored. That is the
+whole reason accumulation is possible: in a fixed frame, samples from different
+moments and different passes are additive rather than contradictory.
+
+Two gates that are not obvious:
+
+**Yaw rate.** `MAX_SCAN_OMEGA = 0.35 rad/s`, and frames above it are discarded.
+The rgb/depth synchroniser accepts 50 ms of skew. Translating during that gap
+is harmless — 14 mm at full speed — but rotating moves the whole image: at
+fx = 224, one rad/s smears the pair by 11 px, and a 3 m blob is about 6 px
+across. This is the quantitative version of "only scan while driving straight".
+Gentle MPPI heading corrections pass; a spin-in-place does not, which is why
+the survey stops at each heading instead of scanning through a continuous spin.
+
+**Near range.** `SEARCH_MIN_RANGE = 0.40 m`. During the carry to the hopper the
+gripper holds a shuttlecock about 100 mm from the lens, where it is by far the
+largest yellow object in frame. Without the gate it is logged as a target
+inside the robot. The scanner is also disabled across the pick; this is the
+backstop for the moments around it.
+
+The pick has its own, much lower floor — `MIN_DETECT_RANGE = 0.20 m` — and the
+difference matters. Sharing one 0.40 m value between the two silently broke the
+pick: at the arm's search pose the camera rides on link5 almost directly above
+the target, which reads 0.33–0.38 m, so the shared floor rejected the object
+the pick exists to find. The failure was total and quiet — five search bearings
+swept, no sighting logged, `No reachable shuttlecock found` every time — and it
+was only separable from the new search code by re-running the ground-truth
+baseline, which failed identically. A gate written for one caller and applied
+to two is worth this much suspicion.
+
+### `target_map.py` — from coordinates to a list of objects
+
+Deliberately free of ROS imports: pure arithmetic on tuples, so the clustering
+rules can be tested in milliseconds and argued about without a simulator.
+`test/test_target_map.py` pins all of them.
+
+**Merge**, radius 0.35 m. Bounded below by measurement error and above by
+object separation. At 3 m a blob's centroid is uncertain by a pixel or two
+(13 mm/px at that range) on top of the sensor's 30 mm sigma. The scatter keeps
+shuttlecocks 0.90 m apart. 0.35 sits clear of both: one object never splits in
+two, two objects never collapse into one.
+
+**Confirm**, 3 hits. A single frame is not evidence — yellow noise, a glint, a
+half-occluded blob all produce one-frame ghosts, and by definition they cannot
+repeat in the same place. Driving past at 0.285 m/s with depth at 4.2 Hz gives
+roughly 15 frames inside the detection radius, so three is cheap.
+
+**Retire**, radius 0.40 m. A collected shuttlecock is gone, but detections
+captured moments earlier are still in the queue and would happily resurrect it.
+Retiring blacklists the location. Slightly wider than the merge radius so a
+near-miss detection is still absorbed, still well inside 0.90 m so retiring one
+object never blinds the robot to its neighbour.
+
+**Position** is the median over the *closest* five observations, not all of
+them. Error scales with range, so a handful of 1 m looks carry far more
+information than fifty 3 m looks, and letting the distant ones vote just drags
+the estimate around. Median rather than mean for the same reason `locate_ball`
+uses one: a single 40 mm flier in a five-sample mean moves the answer by 8 mm.
+
+**One failed pick does not write a target off.** A drive-by fix is worth
+centimetres and the grasp-grade detector re-runs from the standoff on arrival,
+so a first failure more likely means "the estimate was off" than "there is
+nothing here". Two failures, the second from close range with a fresh look, is
+a ghost.
+
+### `scripts/search_trials.py` — the loop
+
+1. Survey from a standstill until something is found.
+2. Drive to the nearest known target **with the camera running**, banking
+   whatever else passes through view.
+3. Pick it, deposit it, retire it.
+4. Go to the nearest remaining known target. Survey again only when the map
+   runs dry.
+
+Step 2 is what makes this affordable. A survey costs 15–20 s of standing still,
+and paying that before every pick would dominate the trial. Driving to one
+shuttlecock sweeps a corridor roughly 6 m wide, so most of the time the next
+target is already in the map by the time the current one is in the hopper.
+
+The survey grid is generated from the same `FIELD` bounds the scatter uses, so
+the search area and the object distribution cannot drift apart. Spacing is set
+from the ~3 m detection radius rather than the court: 2.40 m apart, so a
+shuttlecock in the gap between two waypoints is seen from both rather than
+neither. On the standard half-court that is a 2×2 grid, walked serpentine.
+
+**Ground truth is read, but only after the robot has committed.** It picks
+which real object the attempt was aimed at, within `SCORE_RADIUS = 0.60 m`, and
+labels the outcome. Nothing that steers the robot touches it. An attempt with
+no real object inside that radius is scored `GHOST` — the map invented a
+target — which is a failure mode `collect_trials` cannot have and therefore
+cannot measure.
+
+### What it measures
+
+End to end, 6 shuttlecocks scattered over a half-court, robot starting in the
+corner with an empty map: **6 collected out of 6**, in 7 attempts — one
+spurious target, no real object missed. Mean 101 s per successful pick against
+103 s for the ground-truth harness on the same field, so knowing nothing costs
+essentially nothing per pick.
+
+**One survey for the whole trial.** The opening sweep confirmed 4 targets; the
+other 2 were discovered while driving to those. That is the entire argument for
+step 2 — had every pick needed its own survey, the trial would have carried
+six 15–20 s sweeps instead of one.
+
+Final aim error before each pick, after the stationary re-look: **64–239 mm,
+mean 129 mm**. The re-look itself moved targets by 9–109 mm on this run, and by
+673 mm on an earlier one.
+
+Detector accuracy in isolation, from a standstill and correctly localised,
+against 10 shuttlecocks scattered 1.3 to 6.5 m out: **4 found, all four inside
+3.74 m, none beyond 3.88 m**, position errors **36–55 mm** against the same aim
+point the grasp uses. During a survey the errors roughly triple, to 65–148 mm —
+and that is AMCL, not the camera. Its own error against ground truth swings
+between 38 and 168 mm across a single four-stop rotation, which bounds anything
+expressed in the map frame. The stationary re-look exists precisely because it
+is taken from close range immediately before committing, when that error is at
+its smallest.
+
+An early run of the same test reported 250–850 mm errors, all biased one way.
+That was not the detector — the scene had been set up by teleporting the robot
+without re-seeding AMCL, leaving the `map` frame 554 mm and 8.6° from ground
+truth. Worth recording because the symptom (a consistent directional bias in
+world coordinates) looks exactly like a camera extrinsic error and is not one.
+The second-order version of the same trap: scoring against the model origin
+rather than `skirt_centre` inflated the residual from ~45 mm to ~85 mm.
+
+---
+
+## 8. `scripts/cmd_vel_guard.py` — last-resort collision guard
 
 Sits between nav2 and the wheels: subscribes `/cmd_vel_smoothed`, forward-
 simulates the commanded motion against the current laser scan, and scales or
@@ -524,7 +747,7 @@ it was faster.
 
 ---
 
-## 8. `scripts/scan_self_filter.py` — drop the robot's own reflections
+## 9. `scripts/scan_self_filter.py` — drop the robot's own reflections
 
 The lidar sees the arm. Measured by capturing `/scan` from four robot poses and
 keeping only beams that saw something closer than 0.45 m from **every** pose —
@@ -555,7 +778,7 @@ nav2's SensorDataQoS costmap readers are still fine.
 
 ---
 
-## 9. `scripts/ops/` — operational scripts
+## 10. `scripts/ops/` — operational scripts
 
 **`seed_amcl.py`** publishes `/initialpose` and **verifies the postcondition**:
 it waits for `map -> base_link` to actually appear and exits non-zero if it does
@@ -595,7 +818,7 @@ list in a script file.
 
 ---
 
-## 10. `launch/grasp_trial.launch.py`
+## 11. `launch/grasp_trial.launch.py`
 
 One command for the whole thing. See §3 for the ordering rationale, which is
 the substance of this file.
@@ -620,7 +843,7 @@ workspace and nowhere else. A missing sibling fails at runtime with
 
 ---
 
-## 11. `config/amcl.yaml` — nav2 tuning
+## 12. `config/amcl.yaml` — nav2 tuning
 
 Only the settings with a story behind them.
 
@@ -683,7 +906,7 @@ pass only `{autostart}` and `{node_names}` to the lifecycle managers, so a
 
 ---
 
-## 12. `scripts/make_badminton_world.py`
+## 13. `scripts/make_badminton_world.py`
 
 Generates **both** `badminton_court.sdf` and `badminton_court.{pgm,yaml}` from
 one set of constants. The world and the map the robot localises against must
@@ -702,7 +925,7 @@ comments through `yaml.safe_load`. Both were hit more than once.
 
 ---
 
-## 13. The `rosbot_ros` fork
+## 14. The `rosbot_ros` fork
 
 ### `hopper.urdf.xacro`
 
@@ -800,12 +1023,16 @@ control deadlines and timing out.
 
 ---
 
-## 14. Traps, indexed
+## 15. Traps, indexed
 
 Things that cost real time, worth recognising by their symptoms.
 
 | Symptom | Cause |
 |---|---|
+| Detections consistently biased one direction in world coordinates | Not a camera extrinsic. The `map` frame is offset from ground truth — usually the robot was teleported without re-seeding AMCL. |
+| `RuntimeError: X not found in grasp_ball.py` | A script is reading constants out of grasp_ball's **source text** and the constant moved. Import it from `detect_params` instead. |
+| A target logged inside the robot's own footprint | Scanner running during the carry: the shuttlecock in the jaws is 100 mm from the lens. `MIN_DETECT_RANGE` is the backstop. |
+| `No reachable shuttlecock found` after a clean sweep of all five search bearings, with no sighting logged at all | A near-range floor set above the pick's own working range. At the search pose the target reads **0.33–0.38 m**, so a 0.40 m floor rejects it. See `MIN_DETECT_RANGE`. |
 | Collision with a link that is nowhere near the arm | MoveIt planning against a **different robot description** than the sim is running. Check the `components_config` the launch passes. |
 | Half-active nav2 stack, `controller_server` up and the rest inactive | AMCL seeded *after* navigation launched; global costmap could not activate. |
 | `CRITICAL FAILURE: SERVER x IS DOWN`, healthy node | Bond heartbeat under load. `bond_timeout` must be set at manager *construction*. |

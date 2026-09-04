@@ -47,8 +47,12 @@ setup(
         # launch file only surfaces once the trial actually starts.
         'scripts/repeatability_test.py',
         'scripts/collect_trials.py',
+        # search_trials imports collect_trials for the field geometry and
+        # drive primitives, so the same colocation rule applies.
+        'scripts/search_trials.py',
         'scripts/ops/seed_amcl.py',
         'scripts/ops/arm_lifecycle.py',
+        'scripts/dev/detect_view.py',
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -63,8 +67,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'grab_sequence = grab_sequence.grab_sequence:main',
-            'ball_detector = grab_sequence.ball_detector:main',
             'grasp_ball = grab_sequence.grasp_ball:main',
             'probe_reach = grab_sequence.probe_reach:main',
         ],

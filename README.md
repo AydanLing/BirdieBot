@@ -3,9 +3,9 @@
 https://github.com/user-attachments/assets/33159f59-d129-48f2-8405-3e28f053adb7
 
 A ROSbot XL with an OpenMANIPULATOR-X arm clears a badminton court of
-shuttlecocks. It drives to each one, aligns on an eye-in-hand depth camera,
-picks it up, carries it back and drops it into an onboard hopper — then goes
-looking for the next.
+shuttlecocks. It finds them with an eye-in-hand depth camera, drives to each
+one, picks it up, carries it back and drops it into an onboard hopper — then
+goes looking for the next. It is not told where any of them are.
 
 ROS 2 Jazzy, Gazebo Harmonic, nav2, MoveIt 2.
 
@@ -23,9 +23,15 @@ teleporting the base between picks.
 
 | task | result |
 |---|---|
+| **Autonomous search**, 6 shuttlecocks, positions unknown | **6/6**, one survey for the whole trial |
 | Court clearing, 4 shuttlecocks, one half | **4/4**, 6.3 min, deposited in the hopper |
 | Court clearing, 16 shuttlecocks, full court | **14/16**, 34.7 min |
 | Navigate-then-grasp, single object, 3.8–6.0 m | **10/10** |
+
+In the autonomous run the robot started in a corner with an empty map and no
+prior knowledge of the field. Mean 101 s per successful pick, against 103 s for
+the same harness handed every object's true position — so searching for them
+cost essentially nothing per pick.
 
 Measured against Gazebo ground truth rather than the robot's own report, which
 matters more than it sounds: the robot will happily log a clean pick while the
@@ -45,6 +51,15 @@ Three layers of control, separate because each fails differently:
 Then the arm picks the object up, and carries it to the hopper in staged moves —
 rise, tilt, traverse, release — because doing it as one diagonal sweep clips the
 chassis and flicks the shuttlecock out of the jaws.
+
+Finding the objects in the first place is a fourth layer, and the interesting
+constraint is range: a shuttlecock stops producing a usable blob at about 4 m,
+so the robot only ever holds a local picture. It surveys from a standstill,
+then keeps the camera running while driving to what it found, which banks the
+next targets for free — one survey covered an entire six-object trial. Because
+a position measured on the move is worth about half a metre and the same object
+measured stopped is worth about forty millimetres, every target is re-measured
+from a standstill before the robot commits to driving at it.
 
 ## Reading the code
 
@@ -92,6 +107,15 @@ ros2 launch grab_sequence grasp_trial.launch.py headless:=False    # watch it
 ros2 launch grab_sequence grasp_trial.launch.py shuttles:=8 trials:=2
 ros2 launch grab_sequence grasp_trial.launch.py run_trial:=false   # stack only
 ```
+
+The trial harnesses can also be run directly against a live stack:
+
+```bash
+ros2 run grab_sequence collect_trials.py 1    # told where everything is
+ros2 run grab_sequence search_trials.py 1     # has to find it itself
+```
+
+`COLLECT_N` sets the shuttlecock count for both.
 
 Bringup takes about 3 minutes. `scripts/ops/teardown.sh` stops everything —
 use it rather than Ctrl-C, for reasons in the next section.
@@ -146,7 +170,11 @@ full stack plus a batch runs at 20–38. Run Gazebo headless, and under load the
 ```
 launch/grasp_trial.launch.py   one command: stack + trials, in the order that works
 grab_sequence/grasp_ball.py    the pick: detect, align, grasp, carry, deposit
-scripts/collect_trials.py      court-clearing harness
+grab_sequence/shuttle_scanner.py  drive-by detection: capture-time TF, motion gates
+grab_sequence/target_map.py    what the robot believes is out there, and where
+grab_sequence/detect_params.py thresholds, split grasp-grade from search-grade
+scripts/collect_trials.py      court-clearing harness, given ground truth
+scripts/search_trials.py       court-clearing harness, given nothing
 scripts/nav_grasp_trials.py    single-object navigate-then-grasp harness
 scripts/cmd_vel_guard.py       last-resort collision guard between nav2 and the wheels
 scripts/scan_self_filter.py    drops laser returns that land on the robot itself
