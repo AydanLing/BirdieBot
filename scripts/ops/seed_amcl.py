@@ -40,6 +40,7 @@ def _argv():
     a = sys.argv
     return a[:a.index("--ros-args")] if "--ros-args" in a else a
 
+
 def main():
     x = float(_argv()[1]) if len(_argv()) > 1 else 0.0
     y = float(_argv()[2]) if len(_argv()) > 2 else 0.0

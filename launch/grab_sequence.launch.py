@@ -6,6 +6,7 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from moveit_configs_utils import MoveItConfigsBuilder
 
+
 def generate_launch_description():
     moveit_config = (
         MoveItConfigsBuilder("rosbot_xl", package_name="rosbot_moveit")

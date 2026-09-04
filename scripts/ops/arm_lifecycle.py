@@ -54,6 +54,7 @@ def _argv():
     a = sys.argv
     return a[:a.index("--ros-args")] if "--ros-args" in a else a
 
+
 def main():
     mgr = _argv()[1]
     nodes = _argv()[2].split(",")

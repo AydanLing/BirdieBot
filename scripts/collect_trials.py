@@ -45,13 +45,11 @@ import time
 import rclpy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from nav_grasp_trials import (ARM_X, STANDOFF, ClearanceMonitor,  # noqa: E402
-                              NavGrasp, _activate_nav2_nodes,
-                              _inactive_nav2_nodes, _wait_for_transform,
-                              clear_of_obstacles, obstacle_clearance,
+from nav_grasp_trials import (_activate_nav2_nodes, _inactive_nav2_nodes,  # noqa: E402,I202
+                              _wait_for_transform, ARM_X, clear_of_obstacles,
+                              ClearanceMonitor, NavGrasp, obstacle_clearance,
                               obstacle_names, spawn_obstacles)
-from repeatability_test import (UNKNOWN, GzQueryFailed,  # noqa: E402
-                                WorldMismatch, classify, park_arm, probe_pose,
+from repeatability_test import (classify, park_arm, probe_pose,  # noqa: E402
                                 remove_model, resolved_shuttlecock_sdf,
                                 run_grasp, set_pose, skirt_centre, spawn_model)
 
@@ -144,6 +142,8 @@ def _on_alarm(signum, frame):
 # 22% of the work. fine_approach turns, drives and turns closed on AMCL, which
 # is exactly the manoeuvre a short hop needs, and at FINE_V 0.25 m/s it covers
 # 2 m in about 8 s.
+
+
 SHORT_HOP = 2.00
 
 # fine_approach drives a straight line and knows nothing about obstacles, so the
@@ -345,7 +345,6 @@ def main():
         # NOT sweeping shm here any more. See sweep_orphan_shm's docstring: the
         # /proc/*/maps test is not a safe liveness test and this was destroying
         # segments still in use.
-        swept = 0
         for nm in names:
             remove_model(nm)
         # The single-object harness leaves a model called "shuttlecock" wherever

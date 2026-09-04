@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 
+
 def _detect_world(default="husarion_world"):
     """Ask Gazebo which world is running instead of hardcoding it.
 
@@ -163,7 +164,7 @@ def gz_run(args, timeout=20):
 
 
 def gz(args, timeout=20):
-    """stdout only, for calls whose result is verified some other way."""
+    """Return stdout only, for calls whose result is verified some other way."""
     return gz_run(args, timeout)[1]
 
 
@@ -263,7 +264,7 @@ def model_list(attempts=GZ_ATTEMPTS):
 
 
 def in_world(pose, floor=-0.20, span=25.0):
-    """Is this pose somewhere an object can still be interacted with?
+    """Report whether this pose is somewhere an object can still be reached.
 
     `gz model --list` keeps listing a model that has fallen through the floor
     or been flung out of the room, so presence in the list is not enough to

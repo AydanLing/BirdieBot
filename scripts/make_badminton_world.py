@@ -33,7 +33,6 @@ than in a corner.
 
 import argparse
 import os
-import struct
 
 # --- regulation badminton dimensions, metres -----------------------------
 COURT_L = 13.40          # doubles length, baseline to baseline
@@ -59,7 +58,7 @@ MAP_PAD = 1.0            # metres of margin beyond the outer wall face
 
 def box(name, sx, sy, sz, x, y, z, rgba, collide=True):
     col = f"""
-        <collision name="c"><geometry><box><size>{sx} {sy} {sz}</size></box></geometry></collision>""" if collide else ""
+        <collision name="c"><geometry><box><size>{sx} {sy} {sz}</size></box></geometry></collision>""" if collide else ""  # noqa: E501
     return f"""
       <link name="{name}">
         <pose>{x} {y} {z} 0 0 0</pose>{col}
@@ -137,7 +136,7 @@ def build_world():
         parts.append(f"""
       <link name="net_post_{tag}">
         <pose>0 {sign * hw} {NET_POST_H / 2} 0 0 0</pose>
-        <collision name="c"><geometry><cylinder><radius>{post_r}</radius><length>{NET_POST_H}</length></cylinder></geometry></collision>
+        <collision name="c"><geometry><cylinder><radius>{post_r}</radius><length>{NET_POST_H}</length></cylinder></geometry></collision>  # noqa: E501
         <visual name="v">
           <geometry><cylinder><radius>{post_r}</radius><length>{NET_POST_H}</length></cylinder></geometry>
           <material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.2 0.2 0.2 1</diffuse></material>
