@@ -94,9 +94,10 @@ MAX_SCAN_JOINT_RATE = 0.05
 # Measured on this stack, capture-time lookups fail with "extrapolation into
 # the future" -- the camera's stamps run ahead of the latest TF, so the
 # transform for a given frame does not exist yet and the only question is how
-# long to wait for it. AMCL post-dates map->odom by a full second, so the gap
-# is downstream of that: the EKF publishes odom->base_link at about 9 Hz with
-# no post-dating.
+# long to wait for it. AMCL post-dates map->odom by a full second
+# (transform_tolerance), so the gap is downstream of that: the EKF publishes
+# odom->base_link at its configured 25 Hz with no post-dating at all, so a
+# stamp landing past the newest sample has nothing to interpolate against.
 #
 # Waiting two seconds meant the fallback, when it fired, used a transform two
 # seconds after capture -- worse than the problem it was working around. One
